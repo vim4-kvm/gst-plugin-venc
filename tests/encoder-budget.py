@@ -3,40 +3,57 @@
 import argparse
 import json
 import time
+from contextlib import nullcontext
 
 import gi
 
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst
+gi.require_version('GstVideo', '1.0')
+from gi.repository import Gst, GstVideo
 
 
-def measure(rate, pattern):
+def measure(rate, pattern, frames=360, gop=120, i_qp_min=-1, intra_refresh_rows=0,
+            output=None, request_idr=False):
     Gst.init(None)
     source = ('vfmcapsrc' if pattern == 'hdmi' else
-              f'videotestsrc num-buffers=360 pattern={pattern} ! '
+              f'videotestsrc num-buffers={frames} pattern={pattern} ! '
               'video/x-raw,format=NV12,width=3840,height=2160,framerate=60/1')
     pipeline = Gst.parse_launch(
-        source + f' ! amlvenc bitrate=12000 gop=120 framerate={rate} ! '
-        'video/x-h264 ! h264parse ! appsink name=out sync=false')
+        source + f' ! amlvenc bitrate=12000 gop={gop} framerate={rate} '
+        f'i-qp-min={i_qp_min} intra-refresh-rows={intra_refresh_rows} ! '
+        'video/x-h264 ! h264parse config-interval=-1 ! '
+        'video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=out sync=false max-buffers=2')
     sink = pipeline.get_by_name('out')
     rows = []
     pipeline.set_state(Gst.State.PLAYING)
     try:
-        for _ in range(360):
-            sample = sink.emit('try-pull-sample', 10 * Gst.SECOND)
-            if sample is None:
-                message = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR)
-                raise RuntimeError(str(message.parse_error()) if message else 'No sample')
-            buffer = sample.get_buffer()
-            rows.append(dict(size=buffer.get_size(), pts=buffer.pts,
-                             key=not buffer.has_flags(Gst.BufferFlags.DELTA_UNIT),
-                             time=time.monotonic_ns()))
+        with open(output, 'wb') if output else nullcontext() as encoded:
+            for index in range(frames):
+                if request_idr and index == frames // 2:
+                    event = GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0)
+                    if not sink.send_event(event):
+                        raise RuntimeError('Encoder rejected IDR request')
+                sample = sink.emit('try-pull-sample', 10 * Gst.SECOND)
+                if sample is None:
+                    message = pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR)
+                    raise RuntimeError(str(message.parse_error()) if message else 'No sample')
+                buffer = sample.get_buffer()
+                rows.append(dict(size=buffer.get_size(), pts=buffer.pts,
+                                 key=not buffer.has_flags(Gst.BufferFlags.DELTA_UNIT),
+                                 time=time.monotonic_ns()))
+                if encoded:
+                    encoded.write(buffer.extract_dup(0, buffer.get_size()))
     finally:
         pipeline.set_state(Gst.State.NULL)
     duration = (rows[-1]['pts'] - rows[0]['pts']) / 1e9
-    return dict(fps_setting=rate, pattern=pattern, frames=len(rows),
+    intervals = sorted((b['time'] - a['time']) / 1e6 for a, b in zip(rows[30:], rows[31:]))
+    return dict(fps_setting=rate, pattern=pattern, frames=len(rows), gop=gop,
+                i_qp_min=i_qp_min, intra_refresh_rows=intra_refresh_rows,
+                interval_p99_ms=intervals[int((len(intervals)-1)*.99)],
+                interval_max_ms=max(intervals),
                 mbps=sum(row['size'] for row in rows[1:]) * 8 / duration / 1e6,
                 keys=[row['size'] for row in rows if row['key']],
+                key_indices=[i for i, row in enumerate(rows) if row['key']],
                 elapsed=(rows[-1]['time'] - rows[0]['time']) / 1e9)
 
 
@@ -44,5 +61,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('rate', type=int, choices=(0, 30, 60))
     parser.add_argument('--pattern', choices=('smpte', 'ball', 'hdmi'), default='smpte')
+    parser.add_argument('--frames', type=int, default=360)
+    parser.add_argument('--gop', type=int, default=120)
+    parser.add_argument('--i-qp-min', type=int, default=-1)
+    parser.add_argument('--intra-refresh-rows', type=int, default=0)
+    parser.add_argument('--output', help='Save Annex B H264 for independent decoder validation')
+    parser.add_argument('--request-idr', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(measure(args.rate, args.pattern)))
+    if not (32 <= args.frames <= 36000 and 1 <= args.gop <= 1000 and
+            -1 <= args.i_qp_min <= 51 and 0 <= args.intra_refresh_rows <= 135):
+        parser.error('invalid experiment bounds')
+    print(json.dumps(measure(args.rate, args.pattern, args.frames, args.gop,
+                            args.i_qp_min, args.intra_refresh_rows, args.output, args.request_idr)))

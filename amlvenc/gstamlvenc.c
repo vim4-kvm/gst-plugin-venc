@@ -87,6 +87,8 @@ gst_amlvenc_add_v_chroma_format (GstAmlVEnc *encoder, GstStructure * s)
 enum
 {
   PROP_0,
+  PROP_I_QP_MIN,
+  PROP_INTRA_REFRESH_ROWS,
   PROP_GOP,
   PROP_FRAMERATE,
   PROP_BITRATE,
@@ -383,6 +385,15 @@ gst_amlvenc_class_init (GstAmlVEncClass * klass)
           -1, 1000, PROP_IDR_PERIOD_DEFAULT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class, PROP_I_QP_MIN,
+      g_param_spec_int ("i-qp-min", "Minimum I QP",
+          "Experimental I-frame QP floor (-1: vendor defaults); set before starting",
+          -1, 51, -1, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_INTRA_REFRESH_ROWS,
+      g_param_spec_int ("intra-refresh-rows", "Intra refresh rows",
+          "Experimental refreshed MB/CTU rows per frame (0: disabled); set before starting",
+          0, 135, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   g_object_class_install_property (gobject_class, PROP_FRAMERATE,
       g_param_spec_int ("framerate", "Framerate", "Rate-control fps (0: negotiated rate, or 30 for unknown input)",
           0, 120, PROP_FRAMERATE_DEFAULT,
@@ -440,6 +451,8 @@ gst_amlvenc_init (GstAmlVEnc * encoder)
 {
   encoder->gop = PROP_IDR_PERIOD_DEFAULT;
   encoder->framerate = PROP_FRAMERATE_DEFAULT;
+  encoder->i_qp_min = -1;
+  encoder->intra_refresh_rows = 0;
   encoder->bitrate = PROP_BITRATE_DEFAULT;
   encoder->max_buffers = PROP_MAX_BUFFERS_DEFAULT;
   encoder->min_buffers = PROP_MIN_BUFFERS_DEFAULT;
@@ -564,6 +577,24 @@ static gboolean gst_amlvenc_init_encoder (GstAmlVEnc * encoder)
     qp_tbl.qp_P_base = 30;
     qp_tbl.qp_P_min = 0;
     qp_tbl.qp_P_max = 51;
+
+    if (encoder->i_qp_min >= 0) {
+        encode_info.qp_mode = 1;
+        qp_tbl.qp_I_min = encoder->i_qp_min;
+        qp_tbl.qp_I_base = MAX (30, encoder->i_qp_min);
+    }
+    if (encoder->intra_refresh_rows > 0) {
+        /* H.264 uses 16px macroblock rows; HEVC uses 64px CTU rows.
+         * Reject an invalid experiment rather than silently clamping it. */
+        int block_height = encoder->codec.id == AML_CODEC_ID_H264 ? 16 : 64;
+        if (encoder->intra_refresh_rows > (encode_info.height + block_height - 1) / block_height) {
+            GST_ELEMENT_ERROR (encoder, STREAM, ENCODE,
+                ("intra-refresh-rows exceeds the picture height"), (NULL));
+            return FALSE;
+        }
+        encode_info.intra_refresh_mode = 1;
+        encode_info.intra_refresh_arg = encoder->intra_refresh_rows;
+    }
 
     encoder->codec.handle = amvenc_init(encoder->codec.id, encode_info, &qp_tbl);
 
@@ -1175,6 +1206,12 @@ gst_amlvenc_get_property (GObject * object, guint prop_id,
 
   GST_OBJECT_LOCK (encoder);
   switch (prop_id) {
+    case PROP_I_QP_MIN:
+      g_value_set_int (value, encoder->i_qp_min);
+      break;
+    case PROP_INTRA_REFRESH_ROWS:
+      g_value_set_int (value, encoder->intra_refresh_rows);
+      break;
     case PROP_GOP:
       g_value_set_int (value, encoder->gop);
       break;
@@ -1207,9 +1244,21 @@ gst_amlvenc_set_property (GObject * object, guint prop_id,
   GstAmlVEnc *encoder = GST_AMLVENC (object);
   gboolean roi_set_flag = false;
 
+  if ((prop_id == PROP_I_QP_MIN || prop_id == PROP_INTRA_REFRESH_ROWS) &&
+      GST_STATE (encoder) > GST_STATE_READY) {
+    GST_WARNING_OBJECT (encoder, "Experimental controls require a stopped encoder");
+    return;
+  }
+
   GST_OBJECT_LOCK (encoder);
 
   switch (prop_id) {
+    case PROP_I_QP_MIN:
+      encoder->i_qp_min = g_value_get_int (value);
+      break;
+    case PROP_INTRA_REFRESH_ROWS:
+      encoder->intra_refresh_rows = g_value_get_int (value);
+      break;
     case PROP_GOP:
       encoder->gop = g_value_get_int (value);
       break;
