@@ -44,6 +44,29 @@ and then `60` (or `0` to exercise caps negotiation), with NanoKVM stopped.
 The test opens the hardware encoder; do not run it concurrently with a viewer.
 Run as khadas to share the encoder mutex namespace, and restart NanoKVM afterward.
 
+## Quality ceiling (VBR)
+
+The vendor library has no CBR/VBR switch; its rate control always aims at
+`bitrate` and raises QP (lower quality) in motion. `qp-max=-1` keeps that
+behavior. Values 0–51 enable the custom QP range and cap I/P QP, so quality
+holds and the bitrate may exceed the target. Set it before starting the pipeline;
+it must not be below `i-qp-min`. NanoKVM uses `qp-max=36` for its VBR mode.
+
+Moving 4K desktop content (`tools/latency-source.swift --motion`), 3000 Kbps
+target, 60fps budget, 600 frames each (`--pattern hdmi --bitrate 3000 --qp-max N`):
+
+| qp-max | Average | Peak 1 s |
+| --- | --- | --- |
+| -1 (vendor) | 3.98 Mbps | 4.65 Mbps |
+| 38 | 8.58 Mbps | 10.16 Mbps |
+| 34 | 11.93 Mbps | 14.01 Mbps |
+| 30 | 16.59 Mbps | 19.58 Mbps |
+
+The vendor control overshoots the target by about a third in motion; it is not
+a strict constant bitrate. The vendor `strict_rc_window`/`strict_rc_skip_thresh`
+fields were also measured: they skipped up to 89% of frames without holding the
+average or 1 s peak at the target, so they are not exposed.
+
 ## Experimental keyframe controls
 
 Both properties must be configured before starting the pipeline. Defaults retain

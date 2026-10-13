@@ -67,6 +67,7 @@ struct _GstAmlVEnc
   gint encoding_framerate;
   gint i_qp_min;
   gint intra_refresh_rows;
+  gint qp_max;
   guint bitrate;
   guint min_buffers;
   guint max_buffers;

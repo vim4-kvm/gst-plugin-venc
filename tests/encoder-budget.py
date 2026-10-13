@@ -13,14 +13,14 @@ from gi.repository import Gst, GstVideo
 
 
 def measure(rate, pattern, frames=360, gop=120, i_qp_min=-1, intra_refresh_rows=0,
-            output=None, request_idr=False):
+            output=None, request_idr=False, qp_max=-1, bitrate=12000):
     Gst.init(None)
     source = ('vfmcapsrc' if pattern == 'hdmi' else
               f'videotestsrc num-buffers={frames} pattern={pattern} ! '
               'video/x-raw,format=NV12,width=3840,height=2160,framerate=60/1')
     pipeline = Gst.parse_launch(
-        source + f' ! amlvenc bitrate=12000 gop={gop} framerate={rate} '
-        f'i-qp-min={i_qp_min} intra-refresh-rows={intra_refresh_rows} ! '
+        source + f' ! amlvenc bitrate={bitrate} gop={gop} framerate={rate} '
+        f'i-qp-min={i_qp_min} intra-refresh-rows={intra_refresh_rows} qp-max={qp_max} ! '
         'video/x-h264 ! h264parse config-interval=-1 ! '
         'video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=out sync=false max-buffers=2')
     sink = pipeline.get_by_name('out')
@@ -47,8 +47,16 @@ def measure(rate, pattern, frames=360, gop=120, i_qp_min=-1, intra_refresh_rows=
         pipeline.set_state(Gst.State.NULL)
     duration = (rows[-1]['pts'] - rows[0]['pts']) / 1e9
     intervals = sorted((b['time'] - a['time']) / 1e6 for a, b in zip(rows[30:], rows[31:]))
-    return dict(fps_setting=rate, pattern=pattern, frames=len(rows), gop=gop,
-                i_qp_min=i_qp_min, intra_refresh_rows=intra_refresh_rows,
+    # Peak bitrate over one-second windows of media time, excluding the first IDR.
+    window, peak = [], 0
+    for row in rows[1:]:
+        window.append(row)
+        while window[-1]['pts'] - window[0]['pts'] >= Gst.SECOND:
+            window.pop(0)
+        peak = max(peak, sum(r['size'] for r in window) * 8 / 1e6)
+    return dict(fps_setting=rate, bitrate_kbps=bitrate, pattern=pattern, frames=len(rows), gop=gop,
+                i_qp_min=i_qp_min, intra_refresh_rows=intra_refresh_rows, qp_max=qp_max,
+                peak_1s_mbps=peak,
                 interval_p99_ms=intervals[int((len(intervals)-1)*.99)],
                 interval_max_ms=max(intervals),
                 mbps=sum(row['size'] for row in rows[1:]) * 8 / duration / 1e6,
@@ -67,9 +75,13 @@ if __name__ == '__main__':
     parser.add_argument('--intra-refresh-rows', type=int, default=0)
     parser.add_argument('--output', help='Save Annex B H264 for independent decoder validation')
     parser.add_argument('--request-idr', action='store_true')
+    parser.add_argument('--qp-max', type=int, default=-1)
+    parser.add_argument('--bitrate', type=int, default=12000)
     args = parser.parse_args()
     if not (32 <= args.frames <= 36000 and 1 <= args.gop <= 1000 and
-            -1 <= args.i_qp_min <= 51 and 0 <= args.intra_refresh_rows <= 135):
+            -1 <= args.i_qp_min <= 51 and 0 <= args.intra_refresh_rows <= 135 and
+            -1 <= args.qp_max <= 51 and 1000 <= args.bitrate <= 12000):
         parser.error('invalid experiment bounds')
     print(json.dumps(measure(args.rate, args.pattern, args.frames, args.gop,
-                            args.i_qp_min, args.intra_refresh_rows, args.output, args.request_idr)))
+                            args.i_qp_min, args.intra_refresh_rows, args.output, args.request_idr,
+                            args.qp_max, args.bitrate)))

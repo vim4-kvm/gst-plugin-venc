@@ -89,6 +89,7 @@ enum
   PROP_0,
   PROP_I_QP_MIN,
   PROP_INTRA_REFRESH_ROWS,
+  PROP_QP_MAX,
   PROP_GOP,
   PROP_FRAMERATE,
   PROP_BITRATE,
@@ -393,6 +394,10 @@ gst_amlvenc_class_init (GstAmlVEncClass * klass)
       g_param_spec_int ("intra-refresh-rows", "Intra refresh rows",
           "Experimental refreshed MB/CTU rows per frame (0: disabled); set before starting",
           0, 135, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_QP_MAX,
+      g_param_spec_int ("qp-max", "Maximum QP",
+          "I/P-frame QP ceiling (-1: vendor defaults); bitrate may exceed the target; set before starting",
+          -1, 51, -1, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_FRAMERATE,
       g_param_spec_int ("framerate", "Framerate", "Rate-control fps (0: negotiated rate, or 30 for unknown input)",
@@ -453,6 +458,7 @@ gst_amlvenc_init (GstAmlVEnc * encoder)
   encoder->framerate = PROP_FRAMERATE_DEFAULT;
   encoder->i_qp_min = -1;
   encoder->intra_refresh_rows = 0;
+  encoder->qp_max = -1;
   encoder->bitrate = PROP_BITRATE_DEFAULT;
   encoder->max_buffers = PROP_MAX_BUFFERS_DEFAULT;
   encoder->min_buffers = PROP_MIN_BUFFERS_DEFAULT;
@@ -582,6 +588,17 @@ static gboolean gst_amlvenc_init_encoder (GstAmlVEnc * encoder)
         encode_info.qp_mode = 1;
         qp_tbl.qp_I_min = encoder->i_qp_min;
         qp_tbl.qp_I_base = MAX (30, encoder->i_qp_min);
+    }
+    if (encoder->qp_max >= 0) {
+        if (encoder->qp_max < qp_tbl.qp_I_min) {
+            GST_ELEMENT_ERROR (encoder, STREAM, ENCODE,
+                ("qp-max is below i-qp-min"), (NULL));
+            return FALSE;
+        }
+        encode_info.qp_mode = 1;
+        qp_tbl.qp_max = qp_tbl.qp_I_max = qp_tbl.qp_P_max = encoder->qp_max;
+        qp_tbl.qp_I_base = MIN (qp_tbl.qp_I_base, encoder->qp_max);
+        qp_tbl.qp_P_base = MIN (qp_tbl.qp_P_base, encoder->qp_max);
     }
     if (encoder->intra_refresh_rows > 0) {
         /* H.264 uses 16px macroblock rows; HEVC uses 64px CTU rows.
@@ -1212,6 +1229,9 @@ gst_amlvenc_get_property (GObject * object, guint prop_id,
     case PROP_INTRA_REFRESH_ROWS:
       g_value_set_int (value, encoder->intra_refresh_rows);
       break;
+    case PROP_QP_MAX:
+      g_value_set_int (value, encoder->qp_max);
+      break;
     case PROP_GOP:
       g_value_set_int (value, encoder->gop);
       break;
@@ -1244,7 +1264,8 @@ gst_amlvenc_set_property (GObject * object, guint prop_id,
   GstAmlVEnc *encoder = GST_AMLVENC (object);
   gboolean roi_set_flag = false;
 
-  if ((prop_id == PROP_I_QP_MIN || prop_id == PROP_INTRA_REFRESH_ROWS) &&
+  if ((prop_id == PROP_I_QP_MIN || prop_id == PROP_INTRA_REFRESH_ROWS ||
+       prop_id == PROP_QP_MAX) &&
       GST_STATE (encoder) > GST_STATE_READY) {
     GST_WARNING_OBJECT (encoder, "Experimental controls require a stopped encoder");
     return;
@@ -1258,6 +1279,9 @@ gst_amlvenc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_INTRA_REFRESH_ROWS:
       encoder->intra_refresh_rows = g_value_get_int (value);
+      break;
+    case PROP_QP_MAX:
+      encoder->qp_max = g_value_get_int (value);
       break;
     case PROP_GOP:
       encoder->gop = g_value_get_int (value);
