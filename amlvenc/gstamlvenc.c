@@ -72,7 +72,7 @@ gst_amlvenc_add_v_chroma_format (GstAmlVEnc *encoder, GstStructure * s)
 }
 
 #define PROP_IDR_PERIOD_DEFAULT 30
-#define PROP_FRAMERATE_DEFAULT 30
+#define PROP_FRAMERATE_DEFAULT 0
 #define PROP_BITRATE_DEFAULT 2000
 #define PROP_BITRATE_MAX 12000
 #define PROP_MIN_BUFFERS_DEFAULT 2
@@ -384,8 +384,8 @@ gst_amlvenc_class_init (GstAmlVEncClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_FRAMERATE,
-      g_param_spec_int ("framerate", "Framerate", "framerate(fps)",
-          0, 30, PROP_FRAMERATE_DEFAULT,
+      g_param_spec_int ("framerate", "Framerate", "Rate-control fps (0: negotiated rate, or 30 for unknown input)",
+          0, 120, PROP_FRAMERATE_DEFAULT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_BITRATE,
@@ -537,7 +537,16 @@ static gboolean gst_amlvenc_init_encoder (GstAmlVEnc * encoder)
 
     encode_info.width = info->width;
     encode_info.height = info->height;
-    encode_info.frame_rate = encoder->framerate;
+    /* The codec accepts integer fps. Fractional rates are rounded, not
+     * truncated (e.g. 60000/1001 uses a 60 fps rate-control budget). */
+    encoder->encoding_framerate = encoder->framerate;
+    if (!encoder->encoding_framerate && info->fps_n > 0 && info->fps_d > 0)
+      encoder->encoding_framerate = (info->fps_n + info->fps_d / 2) / info->fps_d;
+    if (encoder->encoding_framerate < 1 || encoder->encoding_framerate > 120)
+      encoder->encoding_framerate = 30;
+    encode_info.frame_rate = encoder->encoding_framerate;
+    GST_INFO_OBJECT (encoder, "rate control: %d fps, %u kbps",
+        encoder->encoding_framerate, encoder->bitrate);
     encode_info.bit_rate = encoder->bitrate * 1000;
     encode_info.gop = encoder->gop;
     encode_info.img_format = img_format_convert(GST_VIDEO_INFO_FORMAT(info));
@@ -1090,7 +1099,7 @@ static GstFlowReturn gst_amlvenc_encode_frame (GstAmlVEnc * encoder, GstVideoCod
     //frame_info.crop_top = 0;
     //frame_info.crop_bottom = 0;
     frame_info.bitrate = encoder->bitrate * 1000;
-    frame_info.frame_rate = encoder->framerate;
+    frame_info.frame_rate = encoder->encoding_framerate;
 
     amvenc_metadata_t meta =
     amvenc_encode(encoder->codec.handle, frame_info, frame_type,

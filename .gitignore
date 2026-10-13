@@ -1,1 +1,3 @@
-#Dummy
+*.o
+*.so
+__pycache__/

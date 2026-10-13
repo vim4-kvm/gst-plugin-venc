@@ -64,6 +64,7 @@ struct _GstAmlVEnc
   gint fd[3];
   gint gop;
   gint framerate;
+  gint encoding_framerate;
   guint bitrate;
   guint min_buffers;
   guint max_buffers;
