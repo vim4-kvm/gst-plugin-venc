@@ -44,6 +44,17 @@ and then `60` (or `0` to exercise caps negotiation), with NanoKVM stopped.
 The test opens the hardware encoder; do not run it concurrently with a viewer.
 Run as khadas to share the encoder mutex namespace, and restart NanoKVM afterward.
 
+`tests/encoder-budget.py --codec h264|h265` can also probe higher target rates
+up to 100000 kbps with a separately built experimental plugin. The test rejects
+targets above the loaded plugin's property maximum instead of silently measuring
+the default bitrate. The production plugin remains capped at 12000 kbps.
+For an isolated experiment, copy the source to a temporary build directory,
+change `PROP_BITRATE_MAX` there, and select that build using `GST_PLUGIN_PATH`
+and a separate `GST_REGISTRY`; do not overwrite the installed plugin.
+The JSON records negotiated caps and measured output arrival FPS. HDMI motion
+is required for live throughput measurements; accepting a target does not prove
+that the content actually produces that bitrate or establish a hardware ceiling.
+
 ## Quality ceiling (VBR)
 
 The vendor library has no CBR/VBR switch; its rate control always aims at
