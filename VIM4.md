@@ -20,6 +20,27 @@ at its original path. Future system images must include this build and drop-in,
 as well as the vfmcapsrc plugin and board capture services. Application-only
 updates preserve this platform prerequisite.
 
+## Continuous hardware JPEG
+
+`make -C jpeg/vim4` builds `libgstvim4jpegenc.so` (factory `vim4jpegenc`).
+It uses the Amlogic 5.15 `/dev/jpegenc` ioctls directly, with NV12/NV21 DMA
+input and JPEG quality 1–100. The imported buffer is released after every
+completed frame; the vendor library's per-command DMA mode leaks attachments
+and pins all four VDIN buffers. CONFIG_DMA_INPUT plus RELEASE_DMA_INPUT avoids
+that kernel path. Output sizes are checked against the driver's mapped buffers;
+timeouts stop the encoder before capture buffers are returned.
+
+System-memory input is supported for diagnostics; live capture and GE2D scaling
+use DMA without a raw-frame CPU copy. The plugin has no libjpegenc dependency.
+Package it alongside amlvenc in `/usr/lib/vim4-kvm/gstreamer-1.0`.
+Run `tests/jpeg-hardware.py --exclusive` with all KVM services stopped and a
+4K HDMI source. `GST_PLUGIN_PATH` selects the build; `LD_LIBRARY_PATH` must
+include One-KVM's compatible DMA allocator for scaling tests. It checks sustained
+output, quality/resolution changes, JPEG decoding and repeated close/reopen.
+Measured FPS depends on quality, scaling and content; network/client limits
+are separate from encoder throughput. The JPEG and H.264 encoders must not be
+benchmarked concurrently with another KVM viewer.
+
 ## Rate control
 
 The `framerate` property accepts 0–120. Zero selects the negotiated input rate,
