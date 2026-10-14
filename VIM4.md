@@ -47,7 +47,9 @@ Run as khadas to share the encoder mutex namespace, and restart NanoKVM afterwar
 `tests/encoder-budget.py --codec h264|h265` can also probe higher target rates
 up to 100000 kbps with a separately built experimental plugin. The test rejects
 targets above the loaded plugin's property maximum instead of silently measuring
-the default bitrate. The production plugin remains capped at 12000 kbps.
+the default bitrate. The plugin now accepts up to 60000 kbps; installed older
+builds may still be capped at 12000 kbps. Upgrade the plugin together with the
+applications before using their extended custom bitrate ranges.
 For an isolated experiment, copy the source to a temporary build directory,
 change `PROP_BITRATE_MAX` there, and select that build using `GST_PLUGIN_PATH`
 and a separate `GST_REGISTRY`; do not overwrite the installed plugin.
