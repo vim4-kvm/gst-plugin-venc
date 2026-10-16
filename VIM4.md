@@ -41,6 +41,20 @@ Measured FPS depends on quality, scaling and content; network/client limits
 are separate from encoder throughput. The JPEG and H.264 encoders must not be
 benchmarked concurrently with another KVM viewer.
 
+## Chroma capability
+
+The current libamvenc path outputs 8-bit 4:2:0. RGB input is converted internally;
+it does not imply full-chroma encoding. The plugin does not advertise H.264
+4:4:4/4:2:2/10-bit or HEVC range-extension profiles. Previously a request for
+`high-4:4:4` negotiated successfully while the resulting H.264 SPS still reported
+High profile and 4:2:0. H.265 RGB input similarly produces Main/4:2:0.
+
+Run `python3 tests/encoder-chroma.py --exclusive` as the normal encoder user,
+with KVM applications stopped, candidate `GST_PLUGIN_PATH` and compatible
+allocator `LD_LIBRARY_PATH`. It verifies unsupported profiles are not advertised
+and probes actual H.264/H.265 RGB-input bitstreams with ffprobe. This describes
+the tested vendor API/firmware path, not a proof about every possible silicon mode.
+
 ## Rate control
 
 The `framerate` property accepts 0–120. Zero selects the negotiated input rate,

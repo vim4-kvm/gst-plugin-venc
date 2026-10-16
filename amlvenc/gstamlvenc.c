@@ -102,18 +102,18 @@ enum
         "framerate = (fraction) [0/1, MAX], " \
         "width = (int) [ 1, MAX ], " "height = (int) [ 1, MAX ], " \
         "stream-format = (string) { byte-stream }, " \
-        "alignment = (string) au, " \
-        "profile = (string) { high-4:4:4, high-4:2:2, high-10, high, main," \
-        " baseline, constrained-baseline, high-4:4:4-intra, high-4:2:2-intra," \
-        " high-10-intra }"
+        "alignment = (string) au"
 
+/* libamvenc accepts RGB but converts it to 8-bit 4:2:0 internally. Profile
+ * caps do not configure the library; advertising 4:4:4 lets negotiation
+ * succeed while the resulting SPS still describes 4:2:0. */
 static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("video/x-h264, "
-        COMMON_SRC_PADS "; "
+        COMMON_SRC_PADS ", profile = (string) { high, main, baseline, constrained-baseline }; "
         "video/x-h265, "
-        COMMON_SRC_PADS)
+        COMMON_SRC_PADS ", profile = (string) main")
     );
 
 static void gst_amlvenc_finalize (GObject * object);
