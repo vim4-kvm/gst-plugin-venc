@@ -49,6 +49,10 @@ unchanged input, decoded ten-bit sample quality and bitstream colorimetry.
 UHD also requires the driver to honor the board's `config_mm_sz_mb`; forcing
 the pool to 100 MiB prevents Main10 task-buffer allocation.
 
+The eight-bit encoder also honors NV12/NV21 VideoMeta pitch: a visible width
+of 3440 may use 3456-byte DMA rows. `tests/encoder-stride.py --exclusive`
+checks padded input through both AVC and HEVC and compares decoded pixels.
+
 ## Continuous hardware JPEG
 
 `make -C jpeg/vim4` builds `libgstvim4jpegenc.so` (factory `vim4jpegenc`).

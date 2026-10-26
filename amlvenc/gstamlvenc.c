@@ -992,6 +992,14 @@ static GstFlowReturn gst_amlvenc_encode_frame (GstAmlVEnc * encoder, GstVideoCod
 
     memset(&inbuf_info, 0, sizeof(inbuf_info));
     inbuf_info.buf_fmt = img_format_convert(GST_VIDEO_INFO_FORMAT(info));
+    if (GST_VIDEO_INFO_FORMAT(info) == GST_VIDEO_FORMAT_NV12 ||
+        GST_VIDEO_INFO_FORMAT(info) == GST_VIDEO_FORMAT_NV21) {
+        /* Native HDMI can have padded DMA rows (3440 visible, 3456 pitch).
+         * Zero tells libamvenc to use visible width, producing diagonal rows.
+         */
+        GstVideoMeta *meta = gst_buffer_get_video_meta(frame->input_buffer);
+        inbuf_info.buf_stride = meta ? meta->stride[0] : info->stride[0];
+    }
 
 #if SUPPORT_SCALE
     if (GST_VIDEO_INFO_FORMAT(info) == GST_VIDEO_FORMAT_BGR) {
