@@ -1,0 +1,24 @@
+--- a/multiEnc/amvenc_lib/AML_MultiEncoder.c
++++ b/multiEnc/amvenc_lib/AML_MultiEncoder.c
+@@ -2031,6 +2031,11 @@
+       size_src_luma = luma_stride * vp_align32(ctx->enc_height);
+ //      size_src_chroma = luma_stride * (vp_align16(ctx->enc_height) / 2);
+       endian = ctx->pFbSrc[idx].endian;
++      /* P010 system memory already contains little-endian words. The DMA
++       * source-endian setting must not byte-swap the CPU input in place. */
++      if (ctx->fmt == AMVENC_P010)
++        endian = VDI_LITTLE_ENDIAN;
++
+ 
+       y_dst = (char *) ctx->pFbSrcMem[idx].virt_addr;
+ 
+@@ -2044,7 +2049,8 @@
+           idx, size_src_luma, src, y_dst, ctx->enc_width, ctx->enc_height);
+ 
+       yuv_plane_memcpy(ctx->encOpenParam.coreIdx, ctx->pFbSrc[idx].bufY, src,
+-                       ctx->enc_width, ctx->enc_height, luma_stride,
++                       ctx->enc_width * (ctx->fmt == AMVENC_P010 ? 2 : 1),
++                       ctx->enc_height, luma_stride,
+                        input->pitch, width32alinged, endian);
+ 
+       if (ctx->fmt == AMVENC_NV12 || ctx->fmt == AMVENC_NV21) {

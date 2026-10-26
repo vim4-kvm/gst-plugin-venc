@@ -20,6 +20,35 @@ at its original path. Future system images must include this build and drop-in,
 as well as the vfmcapsrc plugin and board capture services. Application-only
 updates preserve this platform prerequisite.
 
+## HEVC Main10 remote HDR
+
+`hdr/` builds the explicit `vim4hevc10enc` factory. It accepts contiguous
+P010 system-memory input and preserves ten-bit samples, PQ/BT.2020 colorimetry,
+range and the Main10 bitstream profile. SDR P010/BT.709 is also accepted.
+It does not replace the existing eight-bit encoder.
+
+The extended codec ABI must be isolated from the system's libamvenc ABI.
+The plugin loads `/usr/lib/vim4-kvm/hdr/libvpcodec.so` in one private linker
+namespace for the process, with its matching `libamvenc_api.so` beside it.
+Build inputs are pinned in the workspace's Ubuntu download lock; retain the
+SDK's original copyright and license notices. The build applies
+`hdr/p010-cpu-input.patch`: CPU P010 is already little endian and must never be
+byte-swapped in the caller's read-only buffer. Unaligned widths copy two bytes
+per luma sample. The SDK's CPU path derives the UV address from pitch × height;
+the plugin rejects separately mapped planes.
+
+```sh
+sh hdr/build-codec.sh /opt/vim4-hdr-encoder ../build/hdr-codec
+make -C hdr SDK=/opt/vim4-hdr-encoder
+```
+
+Run `tests/hevc-main10.py --exclusive` on the board with candidate plugin and
+private libraries installed, all KVM applications stopped. It exercises both
+codec ABIs in one process, repeated open/close, aligned and unaligned widths,
+unchanged input, decoded ten-bit sample quality and bitstream colorimetry.
+UHD also requires the driver to honor the board's `config_mm_sz_mb`; forcing
+the pool to 100 MiB prevents Main10 task-buffer allocation.
+
 ## Continuous hardware JPEG
 
 `make -C jpeg/vim4` builds `libgstvim4jpegenc.so` (factory `vim4jpegenc`).
