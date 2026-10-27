@@ -149,6 +149,30 @@ The JSON records negotiated caps and measured output arrival FPS. HDMI motion
 is required for live throughput measurements; accepting a target does not prove
 that the content actually produces that bitrate or establish a hardware ceiling.
 
+## Shared remote HDR source
+
+The private `hdr/libgstvim4hevc10.so` also provides `vim4h265src` for NanoKVM,
+JetKVM and PiKVM on the qualified native-HDR 5.15 runtime. It reads the global
+`/etc/default/vim4-kvm-hdr` preference and HDMI EOTF. PQ input with
+`HDR_SDR_ENABLED=0` uses GPU P010 capture and hardware Main10; other input uses
+the independent VDIN1 SDR source and the original eight-bit HEVC encoder.
+H.264 and JPEG retain their SDR paths. HLG and 7.x Main10 are not qualified.
+
+The source reserves encoder memory before capture pools and releases the
+reservation once the SDK owns it. A preference/EOTF change posts a bus error;
+consumers must stop the old pipeline completely and reopen it. This avoids
+two codec ABIs sharing an active hardware allocation. Encoded caps carry the
+actual frame colorimetry. `height` downscales HDR with P010 precision and
+preserves aspect ratio; zero keeps input geometry. `gop` and `qp-max` control
+only the eight-bit encoder; Main10 uses target bitrate and explicit IDR requests.
+Read-only integer properties `hdr-capable` and `hdr-requested` report runtime
+qualification and the current input/policy decision without opening hardware.
+PiKVM uses the latter to share one VDIN1 source between JPEG and SDR HEVC.
+
+Build and test with `make -C hdr SDK=/path/to/pinned/sdk libgstvim4hevc10.so check`.
+Install the matching board launcher, GPU runtime and capture plugin before
+the applications. The Ubuntu encoder package provides `vim4-hevc-hdr-api-1`.
+
 ## Quality ceiling (VBR)
 
 The vendor library has no CBR/VBR switch; its rate control always aims at

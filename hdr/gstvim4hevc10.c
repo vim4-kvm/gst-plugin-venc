@@ -7,6 +7,8 @@
 #include <gst/allocators/gstdmabuf.h>
 #include "vp_multi_codec_1_0.h"
 
+GType gst_vim4_h265_src_get_type(void);
+
 #ifndef VIM4_HDR_LIBRARY
 #define VIM4_HDR_LIBRARY "/usr/lib/vim4-kvm/hdr/libvpcodec.so"
 #endif
@@ -361,7 +363,8 @@ static void gst_vim4_hevc10_class_init(GstVim4Hevc10Class *klass)
 
 static gboolean plugin_init(GstPlugin *plugin)
 {
-    return gst_element_register(plugin, "vim4hevc10enc", GST_RANK_NONE, gst_vim4_hevc10_get_type());
+    return gst_element_register(plugin, "vim4hevc10enc", GST_RANK_NONE, gst_vim4_hevc10_get_type()) &&
+        gst_element_register(plugin, "vim4h265src", GST_RANK_NONE, gst_vim4_h265_src_get_type());
 }
 #define PACKAGE "vim4-hevc10"
 GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, vim4hevc10, "VIM4 HEVC Main10",
