@@ -55,6 +55,36 @@ static void capture_scaling_contract(void)
     gst_object_unref(source);
 }
 
+static void sdr_scaling_contract(void)
+{
+    GstElementFactory *factory = gst_element_factory_find("vim4scale");
+    if (!factory) {
+        g_test_skip("Requires the companion DMA scaler plugin (NULL state only)");
+        return;
+    }
+    gst_object_unref(factory);
+    GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), "height", 1701, NULL);
+    gchar *text = description(source, FALSE);
+    GError *error = NULL;
+    GstElement *bin = gst_parse_bin_from_description(text, TRUE, &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(bin);
+    GstElement *capture = gst_bin_get_by_name(GST_BIN(bin), "capture");
+    GstElement *scaler = gst_bin_get_by_name(GST_BIN(bin), "scaler");
+    guint capture_height, output_height, alignment;
+    g_object_get(capture, "height", &capture_height, NULL);
+    g_object_get(scaler, "height", &output_height, "width-alignment", &alignment, NULL);
+    /* Driver canvas rounding must not change the source's visible aspect ratio. */
+    g_assert_cmpuint(capture_height, ==, 0);
+    g_assert_cmpuint(output_height, ==, 1700);
+    g_assert_cmpuint(alignment, ==, 16);
+    gst_object_unref(scaler);
+    gst_object_unref(capture);
+    gst_object_unref(bin);
+    gst_object_unref(source);
+    g_free(text);
+}
+
 static void bootstrap_retirement(void)
 {
     GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), NULL);
@@ -132,6 +162,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/h265-source/global-policy", policy);
     g_test_add_func("/h265-source/capture-scaling-contract", capture_scaling_contract);
+    g_test_add_func("/h265-source/sdr-scaling-contract", sdr_scaling_contract);
     g_test_add_func("/h265-source/bootstrap-retirement", bootstrap_retirement);
     g_test_add_func("/h265-source/reject-stock-runtime", reject_stock_runtime);
     g_test_add_func("/h265-source/partial-startup-cleanup", partial_startup_cleanup);

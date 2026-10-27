@@ -38,6 +38,15 @@ deploy these matching components before upgrading applications. Native-size
 HDR, global-policy changes and the independent SDR/JPEG paths retain their
 existing bootstrap and teardown rules.
 
+For SDR, a nonzero height now keeps VDIN1 capture at native dimensions and
+scales with the companion `vim4scale` GE2D element. VDIN1's own scaler rounds
+widths to a canvas multiple, which changes the aspect ratio of ultrawide or
+arbitrary-height output. GE2D instead uses visible width and VideoMeta pitch
+independently, emits NV12 DMA, and aligns eight-bit HEVC widths down to 16.
+The encoder package also requires `vim4-sdr-scale-api-1`; its capture package
+requires the shared board launcher's `vim4-dma-capture-api-1`. Deploy the platform
+components together. Height zero keeps the existing native SDR path.
+
 The extended codec ABI must be isolated from the system's libamvenc ABI.
 The plugin loads `/usr/lib/vim4-kvm/hdr/libvpcodec.so` in one private linker
 namespace for the process, with its matching `libamvenc_api.so` beside it.

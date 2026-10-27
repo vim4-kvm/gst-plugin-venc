@@ -78,11 +78,11 @@ static gboolean use_hdr(void)
 
 static gchar *description(GstVim4H265Src *self, gboolean hdr)
 {
+    guint height = self->height ? MAX(self->height & ~1u, 2) : 0;
     if (hdr) {
         /* The capture converter derives the even aspect-preserving width and
          * keeps resized P010 in contiguous DMA. A system-memory videoscale
          * here would also force the SDK's slow CPU upload. */
-        guint height = self->height ? MAX(self->height & ~1u, 2) : 0;
         return g_strdup_printf(
             "vfmcapsrc name=capture height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
             "videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate=%u/1 ! "
@@ -90,12 +90,21 @@ static gchar *description(GstVim4H265Src *self, gboolean hdr)
             "capsfilter caps=\"video/x-h265,stream-format=byte-stream,alignment=au,profile=main-10\"",
             height, self->framerate, self->bitrate, self->framerate);
     }
-    return g_strdup_printf(
-        "vim4vdin1src height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
+    /* VDIN1 rounds scaled widths down to a canvas multiple. Keep its native
+     * visible width and let GE2D preserve aspect ratio for arbitrary heights
+     * and ultrawide inputs, using the source's actual VideoMeta pitch. */
+    gchar *scale = height ? g_strdup_printf(
+        "vim4scale name=scaler height=%u width-alignment=16 ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! ",
+        height) : g_strdup("");
+    gchar *text = g_strdup_printf(
+        "vim4vdin1src name=capture ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
         "videorate drop-only=true ! video/x-raw,framerate=%u/1 ! "
+        "%s"
         "amlvenc bitrate=%u framerate=%u gop=%u qp-max=%d min-force-key-unit-interval=250000000 ! "
         "h265parse config-interval=-1 ! capsfilter caps=\"video/x-h265,stream-format=byte-stream,alignment=au\"",
-        self->height, self->framerate, self->bitrate, self->framerate, self->gop, self->qp_max);
+        self->framerate, scale, self->bitrate, self->framerate, self->gop, self->qp_max);
+    g_free(scale);
+    return text;
 }
 
 static void release_bootstrap(GstVim4H265Src *self)
