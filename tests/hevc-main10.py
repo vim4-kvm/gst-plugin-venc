@@ -48,7 +48,9 @@ def main():
     Gst.init(None)
     with tempfile.TemporaryDirectory(prefix='vim4-main10-') as directory:
         directory = Path(directory)
-        for index, width in enumerate([640, 656, 640]):
+        # Native UU window sizes can land between HEVC's eight-pixel blocks.
+        # Check both sides of that boundary, not only 16/32-pixel alignment.
+        for index, width in enumerate([640, 656, 638, 642, 640]):
             # Exercise the system eight-bit ABI before every private Main10 init.
             run_pipeline(Gst.parse_launch('videotestsrc num-buffers=5 ! '
                 'video/x-raw,format=NV12,width=640,height=384,framerate=60/1 ! '
@@ -71,6 +73,7 @@ def main():
                     stream['color_transfer'], stream['color_primaries']) == (
                     'Main 10', 'yuv420p10le', 'bt2020nc', 'smpte2084', 'bt2020'), stream
             assert int(stream['nb_read_frames']) == 30, stream
+            assert (stream['width'], stream['height']) == (width, height), stream
             decoded = array.array('H', subprocess.check_output(['ffmpeg', '-v', 'error',
                 '-i', str(output), '-frames:v', '1', '-pix_fmt', 'p010le', '-f', 'rawvideo', '-']))
             actual = [value >> 6 for value in decoded]

@@ -1,5 +1,18 @@
 --- a/multiEnc/amvenc_lib/AML_MultiEncoder.c
 +++ b/multiEnc/amvenc_lib/AML_MultiEncoder.c
+@@ -750,6 +750,12 @@
++  /* HEVC codes complete 8-pixel blocks. Match the existing bottom crop
++   * when a native client's scaled width is not a multiple of eight. */
++  if ((pEncOP->picWidth % 8) && param->confWinRight == 0
++        && pEncOP->bitstreamFormat == STD_HEVC)
++    param->confWinRight = 8 - (pEncOP->picWidth % 8);
++
+   if ((pEncOP->picHeight % 8) && param->confWinBot == 0
+         && pEncOP->bitstreamFormat == STD_HEVC) {
+         /*  need set the drop flag */
+        if (InitParam->rotate_angle != 90 && InitParam->rotate_angle != 270)
+        { // except rotation
+                 param->confWinBot = 8 - (pEncOP->picHeight % 8);
 @@ -2031,6 +2031,11 @@
        size_src_luma = luma_stride * vp_align32(ctx->enc_height);
  //      size_src_chroma = luma_stride * (vp_align16(ctx->enc_height) / 2);
@@ -22,3 +35,15 @@
                         input->pitch, width32alinged, endian);
  
        if (ctx->fmt == AMVENC_NV12 || ctx->fmt == AMVENC_NV21) {
+--- a/multiEnc/vpuapi/enc_driver.c
++++ b/multiEnc/vpuapi/enc_driver.c
+@@ -1223,7 +1223,8 @@
+     if (instance->codecMode == W_HEVC_ENC) {
++        alignedWidth = (pOpenParam->picWidth + 7) & ~7;
+         alignedHeight= (pOpenParam->picHeight+ 7) & ~7;
+-        VpuWriteReg(coreIdx, VP5_CMD_ENC_SEQ_SRC_SIZE,   alignedHeight<<16 | pOpenParam->picWidth);
++        VpuWriteReg(coreIdx, VP5_CMD_ENC_SEQ_SRC_SIZE,   alignedHeight<<16 | alignedWidth);
+     }
+     else {
+         VpuWriteReg(coreIdx, VP5_CMD_ENC_SEQ_SRC_SIZE,   pOpenParam->picHeight<<16 | pOpenParam->picWidth);
+     }

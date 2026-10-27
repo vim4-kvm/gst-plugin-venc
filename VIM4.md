@@ -34,7 +34,10 @@ Build inputs are pinned in the workspace's Ubuntu download lock; retain the
 SDK's original copyright and license notices. The build applies
 `hdr/p010-cpu-input.patch`: CPU P010 is already little endian and must never be
 byte-swapped in the caller's read-only buffer. Unaligned widths copy two bytes
-per luma sample. The SDK's CPU path derives the UV address from pitch × height;
+per luma sample. HEVC hardware dimensions round up to eight-pixel blocks in
+both directions; conformance cropping preserves the requested visible size.
+Previously only height was rounded, so widths such as 3022 could stall the
+first encode and teardown. The SDK's CPU path derives the UV address from pitch × height;
 the plugin rejects separately mapped planes. A single complete DMA-buf with
 zero luma offset, identical 16-byte-aligned plane pitches, and UV at pitch ×
 height uses the SDK's `DMA_TYPE` path without CPU mapping or the VMALLOC copy.
