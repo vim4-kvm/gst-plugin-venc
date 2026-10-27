@@ -4,6 +4,7 @@
 #include <link.h>
 #include <gst/video/gstvideoencoder.h>
 #include <gst/video/video.h>
+#include <gst/allocators/gstdmabuf.h>
 #include "vp_multi_codec_1_0.h"
 
 #ifndef VIM4_HDR_LIBRARY
@@ -45,6 +46,8 @@ typedef struct {
     GstVideoInfo info;
     guint bitrate, framerate;
     guint8 *output;
+    /* A packet can arrive before the SDK retires the input DMA buffer. */
+    GHashTable *pending_dma;
 } GstVim4Hevc10;
 typedef GstVideoEncoderClass GstVim4Hevc10Class;
 G_DEFINE_TYPE(GstVim4Hevc10, gst_vim4_hevc10, GST_TYPE_VIDEO_ENCODER)
@@ -65,6 +68,8 @@ static void close_encoder(GstVim4Hevc10 *self)
         api.destroy(self->encoder);
         self->encoder = 0;
     }
+    /* Destroy first: the hardware must no longer own any outstanding fd. */
+    g_hash_table_remove_all(self->pending_dma);
     g_clear_pointer(&self->output, g_free);
 }
 
@@ -125,33 +130,105 @@ static gboolean set_format(GstVideoEncoder *base, GstVideoCodecState *input)
     return gst_video_encoder_negotiate(base);
 }
 
+static gboolean prepare_dma_input(GstVim4Hevc10 *self, GstBuffer *buffer,
+                                  vl_buffer_info_t *input)
+{
+    if (gst_buffer_n_memory(buffer) != 1)
+        return FALSE;
+    GstMemory *memory = gst_buffer_peek_memory(buffer, 0);
+    if (!gst_is_dmabuf_memory(memory))
+        return FALSE;
+
+    GstVideoMeta *meta = gst_buffer_get_video_meta(buffer);
+    if (meta && (meta->format != GST_VIDEO_FORMAT_P010_10LE ||
+                 meta->width != (guint)self->info.width ||
+                 meta->height != (guint)self->info.height || meta->n_planes != 2))
+        return FALSE;
+    gint stride = meta ? meta->stride[0] : self->info.stride[0];
+    gint uv_stride = meta ? meta->stride[1] : self->info.stride[1];
+    gsize y_offset = meta ? meta->offset[0] : self->info.offset[0];
+    gsize uv_offset = meta ? meta->offset[1] : self->info.offset[1];
+    gsize memory_offset;
+    gsize size = gst_memory_get_sizes(memory, &memory_offset, NULL);
+    /* The SDK imports an fd, not an fd + offset. Its single-fd P010 path
+     * derives UV from pitch*height, and requires a 16-byte DMA pitch. */
+    if (stride < self->info.width * 2 || (stride & 15) || stride != uv_stride ||
+        memory_offset || y_offset || uv_offset != (gsize)stride * self->info.height ||
+        size < uv_offset + (gsize)stride * (self->info.height / 2))
+        return FALSE;
+    input->buf_type = DMA_TYPE;
+    input->buf_fmt = IMG_FMT_P010;
+    input->buf_stride = stride;
+    input->buf_info.dma_info.num_planes = 1;
+    input->buf_info.dma_info.shared_fd[0] = gst_dmabuf_memory_get_fd(memory);
+    return input->buf_info.dma_info.shared_fd[0] >= 0;
+}
+
+static gboolean retire_dma_input(GstVim4Hevc10 *self, const vl_buffer_info_t *returned)
+{
+    if (returned->buf_type != DMA_TYPE || !returned->buf_info.dma_info.num_planes)
+        return TRUE;
+    /* This plugin submits exactly one fd per input, including both planes. */
+    gint fd = returned->buf_info.dma_info.shared_fd[0];
+    if (returned->buf_info.dma_info.num_planes != 1 ||
+        !g_hash_table_remove(self->pending_dma, GINT_TO_POINTER(fd))) {
+        GST_ELEMENT_ERROR(self, STREAM, ENCODE,
+            ("Main10 encoder returned an unknown DMA input"), ("fd=%d planes=%u", fd,
+             returned->buf_info.dma_info.num_planes));
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static GstFlowReturn handle_frame(GstVideoEncoder *base, GstVideoCodecFrame *frame)
 {
     GstVim4Hevc10 *self = (GstVim4Hevc10 *)base;
     GstVideoFrame mapped;
-    if (!self->encoder || !gst_video_frame_map(&mapped, &self->info, frame->input_buffer, GST_MAP_READ))
+    gboolean cpu_mapped = FALSE;
+    vl_buffer_info_t input = {0};
+    if (!self->encoder)
         goto fail;
-    /* This SDK's CPU-input path derives chroma from luma + pitch * height;
-     * it does not consume the second plane pointer supplied below. */
-    if (GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0) != GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 1) ||
-        (guint8 *)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 1) !=
-        (guint8 *)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 0) +
-        (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0) * self->info.height) {
-        gst_video_frame_unmap(&mapped);
-        GST_ELEMENT_ERROR(self, STREAM, FORMAT,
-            ("Main10 CPU input requires contiguous P010 planes"), (NULL));
-        goto fail;
-    }
-    vl_buffer_info_t input = {.buf_type=VMALLOC_TYPE, .buf_fmt=IMG_FMT_P010,
+    if (prepare_dma_input(self, frame->input_buffer, &input)) {
+        gint fd = input.buf_info.dma_info.shared_fd[0];
+        if (g_hash_table_contains(self->pending_dma, GINT_TO_POINTER(fd))) {
+            GST_ELEMENT_ERROR(self, STREAM, ENCODE,
+                ("Main10 DMA input was reused before retirement"), ("fd=%d", fd));
+            goto fail;
+        }
+        /* Keep the pool slot and fd alive even after finish_frame releases
+         * the codec frame. No CPU mapping/cache round trip is needed here. */
+        g_hash_table_insert(self->pending_dma, GINT_TO_POINTER(fd),
+                            gst_buffer_ref(frame->input_buffer));
+    } else {
+        if (!gst_video_frame_map(&mapped, &self->info, frame->input_buffer, GST_MAP_READ))
+            goto fail;
+        cpu_mapped = TRUE;
+        /* The CPU path also derives UV from pitch*height. */
+        if (GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0) != GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 1) ||
+            (guint8 *)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 1) !=
+            (guint8 *)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 0) +
+            (gsize)GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0) * self->info.height) {
+            GST_ELEMENT_ERROR(self, STREAM, FORMAT,
+                ("Main10 CPU input requires contiguous P010 planes"), (NULL));
+            goto fail;
+        }
+        input.buf_type = VMALLOC_TYPE;
+        input.buf_fmt = IMG_FMT_P010;
         /* The extended API takes pitch in bytes, including for P010. */
-        .buf_stride=GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0)};
-    input.buf_info.in_ptr[0] = (unsigned long)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 0);
-    input.buf_info.in_ptr[1] = (unsigned long)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 1);
+        input.buf_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&mapped, 0);
+        input.buf_info.in_ptr[0] = (unsigned long)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 0);
+        input.buf_info.in_ptr[1] = (unsigned long)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 1);
+    }
     vl_buffer_info_t returned = {0};
     encoding_metadata_t result = api.encode(self->encoder,
         GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME(frame) ? FRAME_TYPE_IDR : FRAME_TYPE_AUTO,
         self->output, &input, &returned);
-    gst_video_frame_unmap(&mapped);
+    if (cpu_mapped) {
+        gst_video_frame_unmap(&mapped);
+        cpu_mapped = FALSE;
+    }
+    if (!retire_dma_input(self, &returned))
+        goto fail;
     if (!result.is_valid || result.encoded_data_length_in_bytes <= 0 ||
         (guint)result.encoded_data_length_in_bytes > OUTPUT_BYTES) {
         GST_ELEMENT_ERROR(self, STREAM, ENCODE,
@@ -167,6 +244,11 @@ static GstFlowReturn handle_frame(GstVideoEncoder *base, GstVideoCodecFrame *fra
         GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT(frame);
     return gst_video_encoder_finish_frame(base, frame);
 fail:
+    if (cpu_mapped)
+        gst_video_frame_unmap(&mapped);
+    /* On error the API may not report the accepted input back. Stop hardware
+     * before releasing any remaining DMA pool slots. */
+    close_encoder(self);
     gst_video_codec_frame_unref(frame);
     return GST_FLOW_ERROR;
 }
@@ -201,6 +283,16 @@ static void gst_vim4_hevc10_init(GstVim4Hevc10 *self)
 {
     self->bitrate = 4000;
     self->framerate = 60;
+    self->pending_dma = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+        NULL, (GDestroyNotify)gst_buffer_unref);
+}
+
+static void finalize(GObject *object)
+{
+    GstVim4Hevc10 *self = (GstVim4Hevc10 *)object;
+    close_encoder(self);
+    g_hash_table_unref(self->pending_dma);
+    G_OBJECT_CLASS(gst_vim4_hevc10_parent_class)->finalize(object);
 }
 
 static void gst_vim4_hevc10_class_init(GstVim4Hevc10Class *klass)
@@ -210,6 +302,7 @@ static void gst_vim4_hevc10_class_init(GstVim4Hevc10Class *klass)
     GstVideoEncoderClass *encoder = GST_VIDEO_ENCODER_CLASS(klass);
     object->set_property = set_property;
     object->get_property = get_property;
+    object->finalize = finalize;
     g_object_class_install_property(object, PROP_BITRATE, g_param_spec_uint(
         "bitrate", "Bitrate", "Target kbps; set before encoding", 1000, 60000, 4000,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY));
