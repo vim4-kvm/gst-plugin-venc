@@ -114,6 +114,7 @@ static void delayed_retirement(void)
     push(h, gst_buffer_new_allocate(NULL, 128 * 64 * 3 / 2, NULL));
     g_assert_cmpuint(freed_b, ==, 1);
     g_assert_cmpuint(encode_calls, ==, 3);
+    g_assert_cmpuint(((GstVim4Hevc10 *)h->element)->timing_stats.frames, ==, 0);
     gst_harness_teardown(h);
     g_assert_cmpuint(destroy_calls, ==, 1);
 }
@@ -203,9 +204,62 @@ static void stop_reopen(void)
     g_assert_cmpuint(destroy_calls, ==, 2);
 }
 
+static GString *timing_text;
+static guint timing_log_count;
+
+static void capture_timing(const gchar *message)
+{
+    g_assert_true(g_str_has_prefix(message, "vim4hevc10 timing "));
+    timing_log_count++;
+    g_string_append(timing_text, message);
+}
+
+static void timing_summary(void)
+{
+    timing_text = g_string_new(NULL);
+    timing_log_count = 0;
+    GPrintFunc previous = g_set_printerr_handler(capture_timing);
+    g_setenv("VIM4_VIDEO_TIMING", "1", TRUE);
+    GstHarness *h = harness();
+    g_unsetenv("VIM4_VIDEO_TIMING");
+    for (guint cycle = 0; cycle < 80; cycle++) {
+        guint freed_a = 0, freed_b = 0;
+        gint fd_a, fd_b;
+        expected_type = DMA_TYPE;
+        expected_stride = 160;
+        return_fd = -1;
+        push(h, dma_buffer(160, &freed_a, &fd_a));
+        return_fd = fd_a;
+        push(h, dma_buffer(160, &freed_b, &fd_b));
+        g_assert_cmpuint(freed_a, ==, 1);
+        if (cycle == 39)
+            g_assert_cmpuint(timing_log_count, ==, 0);
+        expected_type = VMALLOC_TYPE;
+        expected_stride = 128;
+        return_fd = fd_b;
+        push(h, gst_buffer_new_allocate(NULL, 128 * 64 * 3 / 2, NULL));
+        g_assert_cmpuint(freed_b, ==, 1);
+        g_assert_cmpuint(timing_log_count, ==, (cycle + 1) * 3 / 120);
+    }
+    g_assert_nonnull(strstr(timing_text->str,
+        "frames=120 dma_inputs=80 cpu_inputs=40 pending_peak=2 pending=0 encode_ms="));
+    g_assert_nonnull(strstr(timing_text->str,
+        "frames=240 dma_inputs=160 cpu_inputs=80 pending_peak=2 pending=0 encode_ms="));
+    g_assert_nonnull(strstr(timing_text->str, " encode_max_ms="));
+    Main10Timing *stats = &((GstVim4Hevc10 *)h->element)->timing_stats;
+    g_assert_cmpuint(stats->encode_max_us, <=, stats->encode_us);
+    gst_element_set_state(h->element, GST_STATE_NULL);
+    g_assert_cmpuint(stats->frames, ==, 0);
+    g_assert_cmpuint(stats->pending_peak, ==, 0);
+    gst_harness_teardown(h);
+    g_set_printerr_handler(previous);
+    g_string_free(timing_text, TRUE);
+}
+
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
+    g_unsetenv("VIM4_VIDEO_TIMING");
     api_once = 1;
     api.init = fake_init;
     api.encode = fake_encode;
@@ -217,6 +271,7 @@ int main(int argc, char **argv)
     reused_pending_input();
     noncontiguous_dma_planes();
     stop_reopen();
-    g_print("PASS: Main10 DMA no-map, padded pitch, delayed retirement, CPU fallback, error/stop/reopen lifetime\n");
+    timing_summary();
+    g_print("PASS: Main10 DMA no-map, padded pitch, delayed retirement, CPU fallback, error/stop/reopen lifetime, timing summaries\n");
     return 0;
 }

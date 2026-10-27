@@ -47,6 +47,14 @@ DMA inputs stay referenced until the SDK reports their fd retired. A completed
 output packet alone does not release that reference. Stop, format changes and
 encode errors destroy the encoder before returning outstanding DMA pool slots.
 
+`VIM4_VIDEO_TIMING=1` prints cumulative statistics to stderr every 120 encoded
+frames: DMA/CPU input counts, peak pending DMA inputs, current pending count,
+and mean/maximum SDK encode-call duration. The peak includes the current input
+before the call, so immediate retirement reports a peak of one, not zero.
+Statistics reset when the encoder closes or changes format. With the variable
+unset, the plugin does not read the timing clock, update counters or print
+timing logs. The encode duration excludes CPU input mapping and output copying.
+
 ```sh
 sh hdr/build-codec.sh /opt/vim4-hdr-encoder ../build/hdr-codec
 make -C hdr SDK=/opt/vim4-hdr-encoder

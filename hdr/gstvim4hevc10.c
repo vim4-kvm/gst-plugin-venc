@@ -41,6 +41,11 @@ static gboolean load_api(void)
 }
 
 typedef struct {
+    guint64 frames, dma_inputs, cpu_inputs, encode_us, encode_max_us;
+    guint pending_peak;
+} Main10Timing;
+
+typedef struct {
     GstVideoEncoder parent;
     vl_codec_handle_t encoder;
     GstVideoInfo info;
@@ -48,6 +53,8 @@ typedef struct {
     guint8 *output;
     /* A packet can arrive before the SDK retires the input DMA buffer. */
     GHashTable *pending_dma;
+    gboolean timing;
+    Main10Timing timing_stats;
 } GstVim4Hevc10;
 typedef GstVideoEncoderClass GstVim4Hevc10Class;
 G_DEFINE_TYPE(GstVim4Hevc10, gst_vim4_hevc10, GST_TYPE_VIDEO_ENCODER)
@@ -71,6 +78,8 @@ static void close_encoder(GstVim4Hevc10 *self)
     /* Destroy first: the hardware must no longer own any outstanding fd. */
     g_hash_table_remove_all(self->pending_dma);
     g_clear_pointer(&self->output, g_free);
+    if (self->timing)
+        self->timing_stats = (Main10Timing){0};
 }
 
 static gboolean set_format(GstVideoEncoder *base, GstVideoCodecState *input)
@@ -180,6 +189,28 @@ static gboolean retire_dma_input(GstVim4Hevc10 *self, const vl_buffer_info_t *re
     return TRUE;
 }
 
+static void record_timing(GstVim4Hevc10 *self, vl_buffer_type_t input_type,
+                          guint pending_before_encode, gint64 encode_us)
+{
+    Main10Timing *stats = &self->timing_stats;
+    stats->frames++;
+    if (input_type == DMA_TYPE)
+        stats->dma_inputs++;
+    else
+        stats->cpu_inputs++;
+    stats->pending_peak = MAX(stats->pending_peak, pending_before_encode);
+    stats->encode_us += encode_us;
+    stats->encode_max_us = MAX(stats->encode_max_us, (guint64)encode_us);
+    if (stats->frames % 120 == 0)
+        g_printerr("vim4hevc10 timing frames=%" G_GUINT64_FORMAT
+            " dma_inputs=%" G_GUINT64_FORMAT " cpu_inputs=%" G_GUINT64_FORMAT
+            " pending_peak=%u pending=%u encode_ms=%.3f encode_max_ms=%.3f\n",
+            stats->frames, stats->dma_inputs, stats->cpu_inputs,
+            stats->pending_peak, g_hash_table_size(self->pending_dma),
+            stats->encode_us / (double)stats->frames / 1000.0,
+            stats->encode_max_us / 1000.0);
+}
+
 static GstFlowReturn handle_frame(GstVideoEncoder *base, GstVideoCodecFrame *frame)
 {
     GstVim4Hevc10 *self = (GstVim4Hevc10 *)base;
@@ -220,9 +251,16 @@ static GstFlowReturn handle_frame(GstVideoEncoder *base, GstVideoCodecFrame *fra
         input.buf_info.in_ptr[1] = (unsigned long)GST_VIDEO_FRAME_PLANE_DATA(&mapped, 1);
     }
     vl_buffer_info_t returned = {0};
+    guint pending_before_encode = 0;
+    gint64 encode_begin = 0;
+    if (self->timing) {
+        pending_before_encode = g_hash_table_size(self->pending_dma);
+        encode_begin = g_get_monotonic_time();
+    }
     encoding_metadata_t result = api.encode(self->encoder,
         GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME(frame) ? FRAME_TYPE_IDR : FRAME_TYPE_AUTO,
         self->output, &input, &returned);
+    gint64 encode_us = self->timing ? g_get_monotonic_time() - encode_begin : 0;
     if (cpu_mapped) {
         gst_video_frame_unmap(&mapped);
         cpu_mapped = FALSE;
@@ -236,6 +274,8 @@ static GstFlowReturn handle_frame(GstVideoEncoder *base, GstVideoCodecFrame *fra
                                        result.encoded_data_length_in_bytes));
         goto fail;
     }
+    if (self->timing)
+        record_timing(self, input.buf_type, pending_before_encode, encode_us);
     frame->output_buffer = gst_video_encoder_allocate_output_buffer(base, result.encoded_data_length_in_bytes);
     if (!frame->output_buffer)
         goto fail;
@@ -283,6 +323,7 @@ static void gst_vim4_hevc10_init(GstVim4Hevc10 *self)
 {
     self->bitrate = 4000;
     self->framerate = 60;
+    self->timing = g_strcmp0(g_getenv("VIM4_VIDEO_TIMING"), "1") == 0;
     self->pending_dma = g_hash_table_new_full(g_direct_hash, g_direct_equal,
         NULL, (GDestroyNotify)gst_buffer_unref);
 }
