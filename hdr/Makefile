@@ -12,8 +12,8 @@ libgstvim4hevc10.so: gstvim4hevc10.c gstvim4h265src.c
 test-dma-input: ../tests/hevc-main10-dma.c gstvim4hevc10.c gstvim4h265src.c
 	$(CC) $(CFLAGS) $(shell $(PKG_CONFIG) --cflags gstreamer-check-1.0) -o $@ $< gstvim4h265src.c $(LDLIBS) $(shell $(PKG_CONFIG) --libs gstreamer-check-1.0)
 
-test-h265-source: ../tests/h265-source.c gstvim4h265src.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+test-h265-source: ../tests/h265-source.c gstvim4h265src.c gstvim4hevc10.c
+	$(CC) $(CFLAGS) -o $@ $< gstvim4hevc10.c $(LDLIBS)
 
 check: test-dma-input test-h265-source
 	./test-dma-input

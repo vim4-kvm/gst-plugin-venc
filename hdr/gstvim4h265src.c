@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <fcntl.h>
-#include <stdio.h>
 #include <unistd.h>
 #include <gst/gst.h>
 
@@ -77,36 +76,19 @@ static gboolean use_hdr(void)
     return hdr;
 }
 
-static gchar *hdr_scale(const gchar *input, guint requested_height)
-{
-    guint width = 0, height = 0;
-    gchar **lines = g_strsplit(input, "\n", -1);
-    for (gchar **line = lines; *line; ++line) {
-        if (sscanf(*line, " Hactive: %u", &width) == 1) continue;
-        sscanf(*line, " Vactive: %u", &height);
-    }
-    g_strfreev(lines);
-    if (!width || !height || !requested_height || requested_height >= height)
-        return g_strdup("");
-    guint output_height = requested_height & ~1u;
-    guint output_width = ((guint64)width * output_height / height) & ~1u;
-    return g_strdup_printf("videoscale n-threads=4 ! video/x-raw,width=%u,height=%u ! ",
-        MAX(output_width, 2), MAX(output_height, 2));
-}
-
-static gchar *description(GstVim4H265Src *self, gboolean hdr, const gchar *input)
+static gchar *description(GstVim4H265Src *self, gboolean hdr)
 {
     if (hdr) {
-        gchar *scale = hdr_scale(input, self->height);
-        gchar *text = g_strdup_printf(
-            "vfmcapsrc ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
-            "videorate drop-only=true ! video/x-raw,framerate=%u/1 ! "
-            "videoconvert n-threads=4 ! video/x-raw,format=P010_10LE ! %s"
-            "vim4hevc10enc bitrate=%u framerate=%u ! h265parse config-interval=-1 ! "
+        /* The capture converter derives the even aspect-preserving width and
+         * keeps resized P010 in contiguous DMA. A system-memory videoscale
+         * here would also force the SDK's slow CPU upload. */
+        guint height = self->height ? MAX(self->height & ~1u, 2) : 0;
+        return g_strdup_printf(
+            "vfmcapsrc name=capture height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
+            "videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate=%u/1 ! "
+            "vim4hevc10enc name=encoder bitrate=%u framerate=%u ! h265parse config-interval=-1 ! "
             "capsfilter caps=\"video/x-h265,stream-format=byte-stream,alignment=au,profile=main-10\"",
-            self->framerate, scale, self->bitrate, self->framerate);
-        g_free(scale);
-        return text;
+            height, self->framerate, self->bitrate, self->framerate);
     }
     return g_strdup_printf(
         "vim4vdin1src height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
@@ -176,10 +158,7 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
         self->hdr = use_hdr();
         self->changing = FALSE;
         self->checked_at = g_get_monotonic_time();
-        gchar *input = NULL;
-        g_file_get_contents("/sys/class/hdmirx/hdmirx0/info", &input, NULL, NULL);
-        gchar *text = description(self, self->hdr, input ? input : "");
-        g_free(input);
+        gchar *text = description(self, self->hdr);
         GError *error = NULL;
         self->chain = gst_parse_bin_from_description(text, TRUE, &error);
         g_free(text);

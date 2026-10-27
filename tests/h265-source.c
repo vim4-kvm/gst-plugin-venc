@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <errno.h>
 #include "../hdr/gstvim4h265src.c"
+GType gst_vim4_hevc10_get_type(void);
 
 static void policy(void)
 {
@@ -15,17 +16,43 @@ static void policy(void)
     g_assert_false(preserve_hdr("HDR_SDR_ENABLED=0", "HDR EOTF: SDR\n"));
 }
 
-static void scale(void)
+static void capture_scaling_contract(void)
 {
-    gchar *text = hdr_scale("Hactive: 3440\nVactive: 1440\n", 1080);
-    g_assert_nonnull(strstr(text, "width=2580,height=1080"));
-    g_free(text);
-    text = hdr_scale("Hactive: 1920\nVactive: 1080\n", 2160);
-    g_assert_cmpstr(text, ==, "");
-    g_free(text);
-    text = hdr_scale("", 1080);
-    g_assert_cmpstr(text, ==, "");
-    g_free(text);
+    GstElementFactory *factory = gst_element_factory_find("vfmcapsrc");
+    if (!factory) {
+        g_test_skip("Requires the companion vfmcapsrc plugin (NULL state only; no board access)");
+        return;
+    }
+    gst_object_unref(factory);
+    GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), NULL);
+    const guint requested[] = {0, 1, 1701, 2160};
+    const guint expected[] = {0, 2, 1700, 2160};
+    for (guint i = 0; i < G_N_ELEMENTS(requested); i++) {
+        source->height = requested[i];
+        gchar *text = description(source, TRUE);
+        GError *error = NULL;
+        GstElement *bin = gst_parse_bin_from_description(text, TRUE, &error);
+        g_assert_no_error(error);
+        g_assert_nonnull(bin);
+        GstElement *capture = gst_bin_get_by_name(GST_BIN(bin), "capture");
+        guint height;
+        g_object_get(capture, "height", &height, NULL);
+        g_assert_cmpuint(height, ==, expected[i]);
+        GstElement *encoder = gst_bin_get_by_name(GST_BIN(bin), "encoder");
+        GstPad *sink = gst_element_get_static_pad(encoder, "sink");
+        GstCaps *caps = gst_pad_peer_query_caps(sink, NULL);
+        GstCaps *required = gst_caps_from_string("video/x-raw,format=P010_10LE,framerate=60/1");
+        g_assert_false(gst_caps_is_empty(caps));
+        g_assert_true(gst_caps_is_subset(caps, required));
+        gst_caps_unref(required);
+        gst_caps_unref(caps);
+        gst_object_unref(sink);
+        gst_object_unref(encoder);
+        gst_object_unref(capture);
+        gst_object_unref(bin);
+        g_free(text);
+    }
+    gst_object_unref(source);
 }
 
 static void bootstrap_retirement(void)
@@ -79,7 +106,7 @@ static void terminal_caps(void)
 {
     GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), NULL);
     for (guint hdr = 0; hdr < 2; ++hdr) {
-        gchar *text = description(source, hdr, "");
+        gchar *text = description(source, hdr);
         /* A bare caps expression at the end of a parsed bin is interpreted
          * as an element/URI. The terminal filter must work without a sink. */
         gchar *tail = strrchr(text, '!');
@@ -99,9 +126,12 @@ static void terminal_caps(void)
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
+    /* Use the real encoder type without loading a second copy of this source
+     * class from the shared plugin. No codec is opened in NULL state. */
+    g_assert_true(gst_element_register(NULL, "vim4hevc10enc", GST_RANK_NONE, gst_vim4_hevc10_get_type()));
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/h265-source/global-policy", policy);
-    g_test_add_func("/h265-source/aspect-and-downscale", scale);
+    g_test_add_func("/h265-source/capture-scaling-contract", capture_scaling_contract);
     g_test_add_func("/h265-source/bootstrap-retirement", bootstrap_retirement);
     g_test_add_func("/h265-source/reject-stock-runtime", reject_stock_runtime);
     g_test_add_func("/h265-source/partial-startup-cleanup", partial_startup_cleanup);

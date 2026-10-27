@@ -27,6 +27,17 @@ P010 input and preserves ten-bit samples, PQ/BT.2020 colorimetry,
 range and the Main10 bitstream profile. SDR P010/BT.709 is also accepted.
 It does not replace the existing eight-bit encoder.
 
+The shared `vim4h265src` used by NanoKVM, JetKVM and PiKVM delegates HDR
+downscaling to `vfmcapsrc height=...`, using the same Mali conversion and
+contiguous P010 DMA path as One-KVM/UU. The capture plugin derives the even
+aspect-preserving width and never upscales. Zero keeps native size; nonzero
+odd requests round down to an even height, with a two-pixel minimum.
+CPU `videoscale`/`videoconvert` no longer sit between capture and Main10 encoding.
+The encoder package requires the capture package's `vim4-hdr-scale-api-1`;
+deploy these matching components before upgrading applications. Native-size
+HDR, global-policy changes and the independent SDR/JPEG paths retain their
+existing bootstrap and teardown rules.
+
 The extended codec ABI must be isolated from the system's libamvenc ABI.
 The plugin loads `/usr/lib/vim4-kvm/hdr/libvpcodec.so` in one private linker
 namespace for the process, with its matching `libamvenc_api.so` beside it.
@@ -68,6 +79,11 @@ The `check` target runs offline with a fake codec and real GStreamer memory. It
 covers unmappable DMA input, padded pitch, delayed fd retirement, CPU fallback,
 premature reuse and error/stop/reopen cleanup. It does not test the hardware's
 DMA import, cache synchronization or Main10 pixel fidelity.
+When the companion capture plugin is on `GST_PLUGIN_PATH`, the source test also
+parses the complete HDR bin in NULL state and checks the capture height and
+P010/framerate contract at the real encoder input. It opens no devices; without
+the companion plugin this integration case reports a skip. Platform builds
+select the freshly built capture plugin automatically.
 
 Run `tests/hevc-main10.py --exclusive` on the board with candidate plugin and
 private libraries installed, all KVM applications stopped. It exercises both
