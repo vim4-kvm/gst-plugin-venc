@@ -105,6 +105,23 @@ The eight-bit encoder also honors NV12/NV21 VideoMeta pitch: a visible width
 of 3440 may use 3456-byte DMA rows. `tests/encoder-stride.py --exclusive`
 checks padded input through both AVC and HEVC and compares decoded pixels.
 
+## HEVC fixed QP and lossless
+
+`vim4hevc10enc` also accepts eight-bit NV12/NV21 through the same private SDK.
+The output profile follows the input depth (Main or Main10). Default settings
+retain bitrate control. `fixed-qp=0..51` disables rate control and forces the
+same I/P/B picture QP; `-1` restores bitrate control. `lossless=true` overrides
+QP, enables HEVC transform bypass and disables rate control, noise reduction,
+ROI and intra refresh through the private SDK's lossless path.
+
+Lossless preserves the YUV samples supplied to the encoder, including P010's
+ten-bit samples; HDMI conversion, chroma subsampling and scaling precede it.
+Fixed QP and lossless do not enforce the target bitrate or guarantee 60fps.
+Run `tests/hevc-quality.py --exclusive` with the candidate selected and KVM
+applications stopped. It compares every decoded byte for NV12/NV21/P010,
+checks Main/Main10 and PQ metadata, and reads actual slice QP from the bitstream
+for two fixed-QP settings. Ordinary Main10 DMA lifecycle tests remain required.
+
 ## Continuous hardware JPEG
 
 `make -C jpeg/vim4` builds `libgstvim4jpegenc.so` (factory `vim4jpegenc`).
