@@ -74,7 +74,7 @@ static gboolean configure(GstVim4Wave5Enc *self)
         return FALSE;
     }
     gboolean hevc = h265 && !h264;
-    gchar *device = vim4_video_device("C&M Wave5 VPU encoder");
+    gchar *device = vim4_encoder_device();
     if (!device) {
         GST_ELEMENT_ERROR(self, RESOURCE, NOT_FOUND, ("Expected one Wave5 encoder device"), (NULL));
         return FALSE;

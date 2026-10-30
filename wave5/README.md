@@ -8,6 +8,10 @@ aspect ratio. `input-rate` reports the HDMI rate in hundredths of a frame per se
 caps. `bitrate` is in kbps; `gop=0` enables cyclic intra refresh, while positive GOP
 values retain periodic keyframes. Force-key-unit events reach the V4L2 encoder.
 Bitrate and GOP are configured before starting; restart the pipeline to change them.
+Encoder discovery requires a unique streaming M2M device with HEVC CAPTURE;
+QUERYCAP names and sysfs labels are not used as capability signals. Visible-size
+crop support is separately tested by the matched private V4L2 plugin, retaining
+the legacy kernel path when that test fails.
 
 The encoder views single-buffer NV12 as two DMA planes without copying pixels.
 For 1080-line input, the UV import includes the allocator's verified tail padding.
