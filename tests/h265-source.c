@@ -153,12 +153,53 @@ static void terminal_caps(void)
     gst_object_unref(source);
 }
 
+static void wave5_raw_branch_contract(void)
+{
+    g_setenv("VIM4_VIDEO_BACKEND", "wave5", TRUE);
+    GError *error = NULL;
+    GstElement *pipeline = gst_parse_launch("vim4h265src name=video ! fakesink video.raw ! fakesink", &error);
+    g_assert_no_error(error); g_assert_nonnull(pipeline);
+    GstElement *video = gst_bin_get_by_name(GST_BIN(pipeline), "video");
+    GstPad *raw = gst_element_get_static_pad(video, "raw");
+    g_assert_nonnull(raw); g_assert_true(gst_pad_is_linked(raw));
+    gst_object_unref(raw); gst_object_unref(video); gst_object_unref(pipeline);
+    GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), "height", 1700, NULL);
+    source->wave5 = TRUE;
+    for (guint hdr = 0; hdr < 2; hdr++) {
+        gchar *text = description(source, hdr);
+        GstElement *bin = gst_parse_bin_from_description(text, TRUE, &error);
+        if (error && error->domain == GST_PARSE_ERROR && error->code == GST_PARSE_ERROR_NO_SUCH_ELEMENT) {
+            g_test_skip("Requires companion capture and Wave5 plugins (NULL state only)");
+            g_clear_error(&error);
+            if (bin) gst_object_unref(bin);
+            g_free(text); break;
+        }
+        g_assert_no_error(error); g_assert_nonnull(bin);
+        GstElement *capture = gst_bin_get_by_name(GST_BIN(bin), "capture");
+        guint height;
+        g_object_get(capture, "height", &height, NULL);
+        g_assert_cmpuint(height, ==, 1700);
+        GstElement *encoder = gst_bin_get_by_name(GST_BIN(bin), "encoder");
+        GstPad *sink = gst_element_get_static_pad(encoder, "sink");
+        GstCaps *actual = gst_pad_peer_query_caps(sink, NULL);
+        GstCaps *expected = gst_caps_from_string(hdr ?
+            "video/x-raw,format=P010_10LE,colorimetry=bt2100-pq,framerate=60/1" :
+            "video/x-raw,format=NV12,colorimetry=bt709,framerate=60/1");
+        g_assert_false(gst_caps_is_empty(actual)); g_assert_true(gst_caps_is_subset(actual, expected));
+        gst_caps_unref(expected); gst_caps_unref(actual); gst_object_unref(sink);
+        gst_object_unref(encoder); gst_object_unref(capture); gst_object_unref(bin); g_free(text);
+    }
+    gst_object_unref(source);
+    g_unsetenv("VIM4_VIDEO_BACKEND");
+}
+
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
     /* Use the real encoder type without loading a second copy of this source
      * class from the shared plugin. No codec is opened in NULL state. */
     g_assert_true(gst_element_register(NULL, "vim4hevc10enc", GST_RANK_NONE, gst_vim4_hevc10_get_type()));
+    g_assert_true(gst_element_register(NULL, "vim4h265src", GST_RANK_NONE, gst_vim4_h265_src_get_type()));
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/h265-source/global-policy", policy);
     g_test_add_func("/h265-source/capture-scaling-contract", capture_scaling_contract);
@@ -167,5 +208,6 @@ int main(int argc, char **argv)
     g_test_add_func("/h265-source/reject-stock-runtime", reject_stock_runtime);
     g_test_add_func("/h265-source/partial-startup-cleanup", partial_startup_cleanup);
     g_test_add_func("/h265-source/terminal-caps", terminal_caps);
+    g_test_add_func("/h265-source/wave5-raw-branch-contract", wave5_raw_branch_contract);
     return g_test_run();
 }

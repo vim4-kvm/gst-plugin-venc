@@ -196,6 +196,34 @@ that the content actually produces that bitrate or establish a hardware ceiling.
 
 ## Shared remote HDR source
 
+The `p0-5-native-hdr` candidate also supplies the shared source on V4L2/Wave5.
+Qualification uses the private AMLY capture format, standard HDR10 compound
+controls, bufferless HEVC/Main10/P010 negotiation with PQ/2020/limited VUI,
+and the actual P010 plugin caps. It does not use the kernel release name.
+An encoder profile enumeration alone is insufficient. The probe allocates no
+buffers and starts no streams; the result is not board acceptance.
+
+On that backend, native PQ uses `vim4amlysrc` and P010 DMA; mapping/SDR uses
+`vim4v4l2src` and the existing leased NV12 plane adapter. Main10 restricts raw
+input to P010. The wrapper sends the V4L2 Main10 control value (distinct from
+Main Still Picture), retaining the buffer's real pitch/UV storage and lease.
+The shared source inserts HDR10 prefix SEI before an IRAP or metadata change,
+deduplicates existing mastering/CLL messages while preserving other SEI, and
+drops native AUs without fresh HDMI metadata. Explicit zero values remain valid.
+
+The optional request pad `raw` is requested before READY. It shares this
+capture owner, yielding P010/PQ in native mode and NV12/BT.709 in mapping mode.
+JPEG consumers must insert `vim4pq2sdr`; they must never open a second VDIN or
+label the PQ samples SDR. All raw branches need bounded queues, and screenshot
+branches need an idle valve before their queue. Stop/release the whole bin
+before changing mode; a policy change posts the existing reopen bus error.
+This pad is a Wave5 interface; the 5.15 independent JPEG path is retained.
+
+Offline coverage includes actual bin negotiation and V4L2 control selection,
+silent format substitutions, nonzero SEI bytes, mixed-message deduplication,
+and source cleanup. Four-application/GPU-stack qualification remains a board
+gate; see the workspace's P0-5 evidence before deploying this branch.
+
 The private `hdr/libgstvim4hevc10.so` also provides `vim4h265src` for NanoKVM,
 JetKVM and PiKVM on the qualified native-HDR 5.15 runtime. It reads the global
 `/etc/default/vim4-kvm-hdr` preference and HDMI EOTF. PQ input with

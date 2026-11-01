@@ -2,6 +2,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <gst/gst.h>
+#include <gst/video/video.h>
+#include "hdr10.h"
+#include "../wave5/devices.h"
 
 /* One encoded source owns capture and encoding so all applications use the
  * same HDR policy, contiguous-memory bootstrap and teardown order. JPEG stays
@@ -9,10 +12,11 @@
 typedef struct {
     GstBin parent;
     GstElement *chain;
-    GstPad *src;
+    GstPad *src, *raw;
     guint bitrate, framerate, gop, height;
-    gint qp_max, bootstrap;
-    gboolean hdr, changing;
+    gint qp_max, bootstrap, metadata_fd;
+    gboolean hdr, changing, wave5, have_metadata;
+    Vim4Hdr10 metadata;
     gint64 checked_at;
 } GstVim4H265Src;
 typedef struct { GstBinClass parent; } GstVim4H265SrcClass;
@@ -29,9 +33,56 @@ static gboolean file_equals(const gchar *path, const gchar *expected)
     return equal;
 }
 
+static int video_ioctl(int fd, unsigned long request, void *argument)
+{ return ioctl(fd, request, argument); }
+
+static gboolean factory_p010(GstElementFactory *factory, GstPadDirection direction)
+{
+    GstCaps *required = gst_caps_from_string("video/x-raw,format=P010_10LE");
+    gboolean found = FALSE;
+    for (const GList *item = gst_element_factory_get_static_pad_templates(factory); item; item = item->next) {
+        GstStaticPadTemplate *pad = item->data;
+        if (pad->direction != direction) continue;
+        GstCaps *caps = gst_static_pad_template_get_caps(pad);
+        found |= gst_caps_can_intersect(caps, required);
+        gst_caps_unref(caps);
+    }
+    gst_caps_unref(required);
+    return found;
+}
+
 static gboolean hdr_capable(void)
 {
-    return g_strcmp0(g_getenv("VIM4_VIDEO_BACKEND"), "wave5") != 0 &&
+    if (!g_strcmp0(g_getenv("VIM4_VIDEO_BACKEND"), "wave5")) {
+        /* The encoder is fixed for the lifetime of this process. Never open
+         * a new encoder context on the once-per-second policy poll. */
+        static gsize probed;
+        static gboolean supported;
+        if (g_once_init_enter(&probed)) {
+            const gchar *factories[] = {"vim4amlysrc", "vim4wave5enc", "v4l2h265enc"};
+            gboolean plugins = TRUE;
+            for (guint i = 0; i < G_N_ELEMENTS(factories); i++) {
+                GstElementFactory *factory = gst_element_factory_find(factories[i]);
+                plugins &= factory != NULL;
+                if (factory && i == 0) plugins &= factory_p010(factory, GST_PAD_SRC);
+                if (factory && i == 1) plugins &= !g_strcmp0(
+                    gst_element_factory_get_metadata(factory, "vim4-wave5-main10-api"), "1");
+                if (factory && i == 2) plugins &= factory_p010(factory, GST_PAD_SINK);
+                if (factory) gst_object_unref(factory);
+            }
+            gchar *capture = vim4_video_device("t7-vdin-test"), *encoder = vim4_encoder_device();
+            int cap = capture ? open(capture, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+            int enc = plugins && encoder ? open(encoder, O_RDWR | O_CLOEXEC | O_NONBLOCK) : -1;
+            supported = cap >= 0 && enc >= 0 && vim4_hdr10_probe(cap, enc, video_ioctl);
+            if (cap >= 0) close(cap);
+            if (enc >= 0) close(enc);
+            g_free(capture); g_free(encoder);
+            g_once_init_leave(&probed, 1);
+        }
+        return supported;
+    }
+    return
+        !g_strcmp0(g_getenv("VIM4_SECONDARY_HDMI_CAPTURE"), "1") &&
         file_equals("/sys/module/aml_media/parameters/vdin0_native_hdr", "Y") &&
         file_equals("/sys/module/vfm_cap/parameters/hdr_metadata_version", "1");
 }
@@ -67,6 +118,19 @@ static gboolean preserve_hdr(const gchar *settings, const gchar *input)
 static gboolean use_hdr(void)
 {
     gchar *settings = NULL, *input = NULL;
+    if (!g_strcmp0(g_getenv("VIM4_VIDEO_BACKEND"), "wave5")) {
+        gchar *device = vim4_video_device("t7-vdin-test");
+        int fd = device ? open(device, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+        Vim4Hdr10 metadata;
+        /* The capture control returns ENODATA outside fresh PQ input. Zero
+         * metadata values remain valid; they are never replaced by defaults. */
+        gboolean hdr = hdr_capable() && fd >= 0 && vim4_hdr10_read(fd, &metadata) &&
+            g_file_get_contents("/etc/default/vim4-kvm-hdr", &settings, NULL, NULL) &&
+            preserve_hdr(settings, "HDR EOTF: SMPTE_ST_2048\n");
+        if (fd >= 0) close(fd);
+        g_free(device); g_free(settings);
+        return hdr;
+    }
     gboolean hdr = hdr_capable() &&
         g_file_get_contents("/etc/default/vim4-kvm-hdr", &settings, NULL, NULL) &&
         g_file_get_contents("/sys/class/hdmirx/hdmirx0/info", &input, NULL, NULL) &&
@@ -79,6 +143,19 @@ static gboolean use_hdr(void)
 static gchar *description(GstVim4H265Src *self, gboolean hdr)
 {
     guint height = self->height ? MAX(self->height & ~1u, 2) : 0;
+    if (self->wave5) {
+        return g_strdup_printf(
+            "%s name=capture height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
+            "videorate %s ! video/x-raw,format=%s,framerate=%u/1%s ! "
+            "tee name=raw_capture ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
+            "vim4wave5enc name=encoder bitrate=%u gop=%u framerate=%u ! "
+            "video/x-h265,profile=%s ! h265parse config-interval=-1 ! "
+            "capsfilter caps=\"video/x-h265,stream-format=byte-stream,alignment=au,profile=%s\"",
+            hdr ? "vim4amlysrc" : "vim4v4l2src", height,
+            hdr ? "" : "drop-only=true", hdr ? "P010_10LE" : "NV12", self->framerate,
+            hdr ? ",colorimetry=bt2100-pq" : ",colorimetry=bt709", self->bitrate,
+            self->gop, self->framerate, hdr ? "main-10" : "main", hdr ? "main-10" : "main");
+    }
     if (hdr) {
         /* The capture converter derives the even aspect-preserving width and
          * keeps resized P010 in contiguous DMA. A system-memory videoscale
@@ -132,12 +209,28 @@ static GstPadProbeReturn encoded_frame(GstPad *pad, GstPadProbeInfo *probe, gpoi
                 ("HDR input or global mapping changed; reopen capture"), (NULL));
         }
     }
-    return self->changing ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_OK;
+    if (self->changing) return GST_PAD_PROBE_DROP;
+    if (self->wave5 && self->hdr) {
+        Vim4Hdr10 metadata;
+        if (!vim4_hdr10_read(self->metadata_fd, &metadata)) return GST_PAD_PROBE_DROP;
+        GstBuffer *original = GST_PAD_PROBE_INFO_BUFFER(probe);
+        GstBuffer *with_sei = vim4_hdr10_insert(original, &metadata,
+            !self->have_metadata || memcmp(&metadata, &self->metadata, sizeof(metadata)));
+        if (!with_sei) {
+            GST_ELEMENT_ERROR(self, STREAM, DECODE, ("Invalid HEVC access unit or HDR SEI"), (NULL));
+            return GST_PAD_PROBE_DROP;
+        }
+        self->metadata = metadata; self->have_metadata = TRUE;
+        GST_PAD_PROBE_INFO_DATA(probe) = with_sei;
+        gst_buffer_unref(original);
+    }
+    return GST_PAD_PROBE_OK;
 }
 
 static void clear_chain(GstVim4H265Src *self)
 {
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->src), NULL);
+    if (self->raw) gst_ghost_pad_set_target(GST_GHOST_PAD(self->raw), NULL);
     if (self->chain) {
         /* A failed NULL->READY may leave earlier children in READY, holding
          * capture/codec resources. Stop them before dropping bin ownership. */
@@ -146,25 +239,46 @@ static void clear_chain(GstVim4H265Src *self)
         self->chain = NULL;
     }
     release_bootstrap(self);
+    if (self->metadata_fd >= 0) close(self->metadata_fd);
+    self->metadata_fd = -1;
+    self->have_metadata = FALSE;
+}
+
+static GstPadProbeReturn capture_allocation(GstPad *pad, GstPadProbeInfo *probe, gpointer data)
+{
+    GstQuery *query = GST_PAD_PROBE_INFO_QUERY(probe);
+    if (GST_QUERY_TYPE(query) != GST_QUERY_ALLOCATION) return GST_PAD_PROBE_OK;
+    gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, NULL);
+    /* Same proven HDR2 lease budget as One-KVM: queues, screenshot and encoder
+     * commands retain capture buffers. v4l2src adds its two working slots. */
+    gst_query_add_allocation_pool(query, NULL, 0, 12, 12);
+    return GST_PAD_PROBE_HANDLED;
 }
 
 static GstStateChangeReturn change_state(GstElement *element, GstStateChange transition)
 {
     GstVim4H265Src *self = (GstVim4H265Src *)element;
     if (transition == GST_STATE_CHANGE_NULL_TO_READY) {
-        if (g_strcmp0(g_getenv("VIM4_SECONDARY_HDMI_CAPTURE"), "1") != 0 || !hdr_capable()) {
+        self->wave5 = !g_strcmp0(g_getenv("VIM4_VIDEO_BACKEND"), "wave5");
+        if ((!self->wave5 && g_strcmp0(g_getenv("VIM4_SECONDARY_HDMI_CAPTURE"), "1") != 0) || !hdr_capable()) {
             GST_ELEMENT_ERROR(self, RESOURCE, SETTINGS,
-                ("Shared HEVC capture requires the native HDR 5.15 runtime"), (NULL));
+                ("Shared HEVC capture requires qualified capture, Main10 and plugins"), (NULL));
             return GST_STATE_CHANGE_FAILURE;
         }
         /* Reserve the 200 MiB encoder workspace before GPU or VDIN1 pools. */
-        self->bootstrap = open("/dev/amvenc_multi", O_RDWR | O_CLOEXEC);
-        if (self->bootstrap < 0) {
+        if (!self->wave5) self->bootstrap = open("/dev/amvenc_multi", O_RDWR | O_CLOEXEC);
+        if (!self->wave5 && self->bootstrap < 0) {
             GST_ELEMENT_ERROR(self, RESOURCE, OPEN_READ_WRITE,
                 ("Cannot reserve vendor encoder memory"), (NULL));
             return GST_STATE_CHANGE_FAILURE;
         }
         self->hdr = use_hdr();
+        if (self->wave5 && self->hdr) {
+            gchar *device = vim4_video_device("t7-vdin-test");
+            self->metadata_fd = device ? open(device, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+            g_free(device);
+            if (self->metadata_fd < 0) return GST_STATE_CHANGE_FAILURE;
+        }
         self->changing = FALSE;
         self->checked_at = g_get_monotonic_time();
         gchar *text = description(self, self->hdr);
@@ -177,10 +291,29 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
             g_clear_error(&error);
             if (self->chain) gst_object_unref(self->chain);
             self->chain = NULL;
-            release_bootstrap(self);
+            clear_chain(self);
             return GST_STATE_CHANGE_FAILURE;
         }
         gst_bin_add(GST_BIN(self), self->chain);
+        if (self->wave5 && !self->hdr) {
+            GstElement *capture = gst_bin_get_by_name(GST_BIN(self->chain), "capture");
+            GstPad *src = capture ? gst_element_get_static_pad(capture, "src") : NULL;
+            GstPad *downstream = src ? gst_pad_get_peer(src) : NULL;
+            if (downstream) gst_pad_add_probe(downstream, GST_PAD_PROBE_TYPE_QUERY_DOWNSTREAM,
+                capture_allocation, NULL, NULL);
+            if (downstream) gst_object_unref(downstream);
+            if (src) gst_object_unref(src);
+            if (capture) gst_object_unref(capture);
+            if (!downstream) { clear_chain(self); return GST_STATE_CHANGE_FAILURE; }
+        }
+        if (self->raw) {
+            GstElement *tee = gst_bin_get_by_name(GST_BIN(self->chain), "raw_capture");
+            GstPad *raw = tee ? gst_element_request_pad_simple(tee, "src_%u") : NULL;
+            gboolean connected = raw && gst_ghost_pad_set_target(GST_GHOST_PAD(self->raw), raw);
+            if (raw) gst_object_unref(raw);
+            if (tee) gst_object_unref(tee);
+            if (!connected) { clear_chain(self); return GST_STATE_CHANGE_FAILURE; }
+        }
         GstPad *src = gst_element_get_static_pad(self->chain, "src");
         gst_pad_add_probe(src, GST_PAD_PROBE_TYPE_BUFFER, encoded_frame, self, NULL);
         gboolean linked = gst_ghost_pad_set_target(GST_GHOST_PAD(self->src), src);
@@ -232,9 +365,30 @@ static void gst_vim4_h265_src_init(GstVim4H265Src *self)
     self->gop = 120;
     self->qp_max = -1;
     self->bootstrap = -1;
+    self->metadata_fd = -1;
     self->src = gst_ghost_pad_new_no_target("src", GST_PAD_SRC);
     gst_element_add_pad(GST_ELEMENT(self), self->src);
     GST_OBJECT_FLAG_SET(self, GST_ELEMENT_FLAG_SOURCE);
+}
+
+static GstPad *request_pad(GstElement *element, GstPadTemplate *template,
+                          const gchar *name, const GstCaps *caps)
+{
+    GstVim4H265Src *self = (GstVim4H265Src *)element;
+    /* Request before READY, so one capture pipeline owns both raw and HEVC.
+     * Raw is PQ P010 in native mode, NV12 in mapping mode. Consumers must use
+     * vim4pq2sdr before JPEG; the encoder branch never sees mapped pixels. */
+    if (self->raw || self->chain || g_strcmp0(g_getenv("VIM4_VIDEO_BACKEND"), "wave5")) return NULL;
+    self->raw = gst_ghost_pad_new_no_target_from_template("raw", template);
+    if (!gst_element_add_pad(element, self->raw)) { gst_object_unref(self->raw); self->raw = NULL; }
+    return self->raw;
+}
+static void release_pad(GstElement *element, GstPad *pad)
+{
+    GstVim4H265Src *self = (GstVim4H265Src *)element;
+    if (pad != self->raw) return;
+    gst_ghost_pad_set_target(GST_GHOST_PAD(pad), NULL);
+    gst_element_remove_pad(element, pad); self->raw = NULL;
 }
 
 static void gst_vim4_h265_src_class_init(GstVim4H265SrcClass *klass)
@@ -244,6 +398,7 @@ static void gst_vim4_h265_src_class_init(GstVim4H265SrcClass *klass)
     object->set_property = set_property;
     object->get_property = get_property;
     element->change_state = change_state;
+    element->request_new_pad = request_pad; element->release_pad = release_pad;
     const GParamFlags flags = G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY;
     g_object_class_install_property(object, PROP_BITRATE, g_param_spec_uint(
         "bitrate", "Bitrate", "Target kbps", 1000, 60000, 12000, flags));
@@ -256,13 +411,16 @@ static void gst_vim4_h265_src_class_init(GstVim4H265SrcClass *klass)
     g_object_class_install_property(object, PROP_QP_MAX, g_param_spec_int(
         "qp-max", "Maximum QP", "SDR quality ceiling; Main10 uses target bitrate", -1, 51, -1, flags));
     g_object_class_install_property(object, PROP_HDR_CAPABLE, g_param_spec_int(
-        "hdr-capable", "HDR capable", "Native HDR runtime available without opening hardware", 0, 1, 0,
+        "hdr-capable", "HDR capable", "Native HDR bufferless capability probe; no streaming", 0, 1, 0,
         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
     g_object_class_install_property(object, PROP_HDR_REQUESTED, g_param_spec_int(
-        "hdr-requested", "HDR requested", "Current input and global policy select Main10; opens no hardware", 0, 1, 0,
+        "hdr-requested", "HDR requested", "Fresh PQ input and global policy select Main10; no streaming", 0, 1, 0,
         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
     GstCaps *caps = gst_caps_from_string("video/x-h265,stream-format=byte-stream,alignment=au");
     gst_element_class_add_pad_template(element, gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps));
+    gst_caps_unref(caps);
+    caps = gst_caps_from_string("video/x-raw,format=(string){NV12,P010_10LE}");
+    gst_element_class_add_pad_template(element, gst_pad_template_new("raw", GST_PAD_SRC, GST_PAD_REQUEST, caps));
     gst_caps_unref(caps);
     gst_element_class_set_static_metadata(element, "VIM4 shared HEVC capture", "Source/Video",
         "Global HDR mapping with independent Main10 or SDR capture", "vim4-kvm");
