@@ -16,7 +16,7 @@ test-h265-source: ../tests/h265-source.c gstvim4h265src.c gstvim4hevc10.c hdr10.
 	$(CC) $(CFLAGS) -o $@ $< gstvim4hevc10.c hdr10.c $(LDLIBS)
 
 test-hdr10: ../tests/hdr10.c hdr10.c hdr10.h
-	$(CC) $(CFLAGS) -o $@ $< hdr10.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $< hdr10.c $(LDLIBS) -Wl,--wrap=ioctl
 
 check: test-dma-input test-h265-source test-hdr10
 	./test-dma-input

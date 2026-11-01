@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "hdr10.h"
+#include <errno.h>
 #include <sys/ioctl.h>
 #include <string.h>
 
@@ -59,7 +60,9 @@ gboolean vim4_hdr10_read(int capture, Vim4Hdr10 *metadata)
          .size = sizeof(mastering), .ptr = &mastering},
         {.id = V4L2_CID_COLORIMETRY_HDR10_CLL_INFO, .size = sizeof(cll), .ptr = &cll}};
     struct v4l2_ext_controls controls = {.count = G_N_ELEMENTS(values), .controls = values};
-    if (ioctl(capture, VIDIOC_G_EXT_CTRLS, &controls)) return FALSE;
+    int result;
+    do { result = ioctl(capture, VIDIOC_G_EXT_CTRLS, &controls); } while (result < 0 && errno == EINTR);
+    if (result) return FALSE;
     for (guint i = 0; i < 3; i++) {
         be16(metadata->mastering + i * 4, mastering.display_primaries_x[i]);
         be16(metadata->mastering + i * 4 + 2, mastering.display_primaries_y[i]);
@@ -145,6 +148,24 @@ static gsize start_code(const guint8 *data, gsize size, gsize from, gsize *lengt
         if (data[i + 2] == 1) { *length = 3; return i; }
     }
     return size;
+}
+
+gboolean vim4_hdr10_is_irap(GstBuffer *au)
+{
+    GstMapInfo map;
+    if (!gst_buffer_map(au, &map, GST_MAP_READ)) return FALSE;
+    gsize length = 0, cursor = start_code(map.data, map.size, 0, &length);
+    gboolean irap = FALSE;
+    while (cursor < map.size) {
+        gsize begin = cursor + length;
+        if (begin + 2 <= map.size) {
+            guint kind = (map.data[begin] >> 1) & 63;
+            if (kind >= 16 && kind <= 23) { irap = TRUE; break; }
+        }
+        cursor = start_code(map.data, map.size, begin, &length);
+    }
+    gst_buffer_unmap(au, &map);
+    return irap;
 }
 
 GstBuffer *vim4_hdr10_insert(GstBuffer *au, const Vim4Hdr10 *metadata, gboolean changed)

@@ -2,6 +2,45 @@
 #include "../hdr/hdr10.h"
 #include <sys/ioctl.h>
 #include <string.h>
+#include <errno.h>
+#include <stdarg.h>
+
+static guint metadata_calls;
+static gboolean read_fault;
+int __wrap_ioctl(int fd, unsigned long request, ...)
+{
+    va_list args;
+    va_start(args, request);
+    struct v4l2_ext_controls *controls = va_arg(args, struct v4l2_ext_controls *);
+    va_end(args);
+    g_assert_cmpint(fd, ==, 7);
+    g_assert_cmpuint(request, ==, VIDIOC_G_EXT_CTRLS);
+    metadata_calls++;
+    if (metadata_calls == 1 || read_fault) {
+        errno = read_fault ? EIO : EINTR;
+        return -1;
+    }
+    struct v4l2_ctrl_hdr10_mastering_display *mastering = controls->controls[0].ptr;
+    struct v4l2_ctrl_hdr10_cll_info *cll = controls->controls[1].ptr;
+    mastering->display_primaries_x[0] = 0x1234;
+    cll->max_content_light_level = 1000;
+    return 0;
+}
+
+static void interrupted_metadata_read(void)
+{
+    Vim4Hdr10 metadata = {0};
+    metadata_calls = 0; read_fault = FALSE;
+    g_assert_true(vim4_hdr10_read(7, &metadata));
+    g_assert_cmpuint(metadata_calls, ==, 2);
+    g_assert_cmpuint(metadata.mastering[0], ==, 0x12);
+    g_assert_cmpuint(metadata.mastering[1], ==, 0x34);
+    g_assert_cmpuint(metadata.cll[0], ==, 3);
+    g_assert_cmpuint(metadata.cll[1], ==, 0xe8);
+    metadata_calls = 0; read_fault = TRUE;
+    g_assert_false(vim4_hdr10_read(7, &metadata));
+    g_assert_cmpuint(metadata_calls, ==, 1);
+}
 
 static guint fault, calls;
 static int emulate(int fd, unsigned long request, void *argument)
@@ -128,6 +167,7 @@ int main(int argc, char **argv)
 {
     gst_init(&argc, &argv); g_test_init(&argc, &argv, NULL);
     g_test_add_func("/hdr10/bufferless-negotiation", probe_contract);
+    g_test_add_func("/hdr10/interrupted-metadata-read", interrupted_metadata_read);
     g_test_add_func("/hdr10/prefix-sei", prefix_sei);
     g_test_add_func("/hdr10/mixed-invalid-sei", mixed_and_invalid_sei);
     return g_test_run();

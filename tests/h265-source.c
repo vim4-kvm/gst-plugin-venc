@@ -1,7 +1,68 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <errno.h>
+#include "../hdr/hdr10.h"
+static gboolean metadata_read(int fd, Vim4Hdr10 *metadata);
+#define vim4_hdr10_read metadata_read
 #include "../hdr/gstvim4h265src.c"
+#undef vim4_hdr10_read
 GType gst_vim4_hevc10_get_type(void);
+
+static guint metadata_reads, recovery_requests;
+static gboolean metadata_read(int fd, Vim4Hdr10 *metadata)
+{
+    (void)fd;
+    metadata_reads++;
+    memset(metadata, metadata_reads, sizeof(*metadata));
+    return metadata_reads != 1;
+}
+
+static gboolean recovery_event(GstPad *pad, GstObject *parent, GstEvent *event)
+{
+    g_assert_true(gst_video_event_is_force_key_unit(event));
+    recovery_requests++;
+    gst_event_unref(event);
+    return TRUE;
+}
+
+static void metadata_loss_recovery(void)
+{
+    GstVim4H265Src *source = g_object_new(gst_vim4_h265_src_get_type(), NULL);
+    source->wave5 = source->hdr = source->have_metadata = TRUE;
+    source->checked_at = g_get_monotonic_time();
+    GstPad *pad = gst_pad_new("encoded", GST_PAD_SRC);
+    gst_pad_set_event_function(pad, recovery_event);
+    gst_pad_set_active(pad, TRUE);
+    metadata_reads = recovery_requests = 0;
+    for (guint i = 0; i < 5; i++) {
+        /* Lose an IRAP, suppress its predicted successors, then recover only
+         * on a real IRAP. Flags alone must not label a delta as random access. */
+        guint8 au[] = {0,0,0,1, i == 0 || i == 3 ? 0x26 : 2, 1, 0xaf};
+        GstBuffer *buffer = gst_buffer_new_allocate(NULL, sizeof(au), NULL);
+        gst_buffer_fill(buffer, 0, au, sizeof(au));
+        GstPadProbeInfo probe = {.type = GST_PAD_PROBE_TYPE_BUFFER, .data = buffer};
+        GstPadProbeReturn result = encoded_frame(pad, &probe, source);
+        if (i < 3) {
+            g_assert_cmpint(result, ==, GST_PAD_PROBE_DROP);
+        } else {
+            g_assert_cmpint(result, ==, GST_PAD_PROBE_OK);
+            GstBuffer *sent = GST_PAD_PROBE_INFO_BUFFER(&probe);
+            g_assert_cmpint(GST_BUFFER_FLAG_IS_SET(sent, GST_BUFFER_FLAG_DISCONT), ==, i == 3);
+            if (i == 3) {
+                guint8 prefix[36];
+                g_assert_true(vim4_hdr10_is_irap(sent));
+                g_assert_cmpuint(gst_buffer_extract(sent, 0, prefix, sizeof(prefix)), ==, sizeof(prefix));
+                g_assert_cmpuint(prefix[4] >> 1, ==, 39);
+                g_assert_cmpuint(prefix[6], ==, 137);
+                for (guint n = 8; n < 32; n++) g_assert_cmpuint(prefix[n], ==, 4);
+                g_assert_cmpuint(prefix[32], ==, 144);
+                g_assert_cmpuint(prefix[34], ==, 4);
+            }
+        }
+        gst_buffer_unref(GST_PAD_PROBE_INFO_BUFFER(&probe));
+    }
+    g_assert_cmpuint(recovery_requests, ==, 1);
+    gst_pad_set_active(pad, FALSE); gst_object_unref(pad); gst_object_unref(source);
+}
 
 static void policy(void)
 {
@@ -202,6 +263,7 @@ int main(int argc, char **argv)
     g_assert_true(gst_element_register(NULL, "vim4h265src", GST_RANK_NONE, gst_vim4_h265_src_get_type()));
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/h265-source/global-policy", policy);
+    g_test_add_func("/h265-source/metadata-loss-recovery", metadata_loss_recovery);
     g_test_add_func("/h265-source/capture-scaling-contract", capture_scaling_contract);
     g_test_add_func("/h265-source/sdr-scaling-contract", sdr_scaling_contract);
     g_test_add_func("/h265-source/bootstrap-retirement", bootstrap_retirement);

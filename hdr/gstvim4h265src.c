@@ -15,7 +15,7 @@ typedef struct {
     GstPad *src, *raw;
     guint bitrate, framerate, gop, height;
     gint qp_max, bootstrap, metadata_fd;
-    gboolean hdr, changing, wave5, have_metadata;
+    gboolean hdr, changing, wave5, have_metadata, waiting_irap, recovery_key_requested;
     Vim4Hdr10 metadata;
     gint64 checked_at;
 } GstVim4H265Src;
@@ -212,14 +212,31 @@ static GstPadProbeReturn encoded_frame(GstPad *pad, GstPadProbeInfo *probe, gpoi
     if (self->changing) return GST_PAD_PROBE_DROP;
     if (self->wave5 && self->hdr) {
         Vim4Hdr10 metadata;
-        if (!vim4_hdr10_read(self->metadata_fd, &metadata)) return GST_PAD_PROBE_DROP;
+        if (!vim4_hdr10_read(self->metadata_fd, &metadata)) {
+            /* The encoder has advanced even though this AU cannot be sent.
+             * Its successors may reference the missing picture. */
+            self->waiting_irap = TRUE;
+            self->recovery_key_requested = self->have_metadata = FALSE;
+            return GST_PAD_PROBE_DROP;
+        }
         GstBuffer *original = GST_PAD_PROBE_INFO_BUFFER(probe);
+        if (self->waiting_irap && !vim4_hdr10_is_irap(original)) {
+            if (!self->recovery_key_requested) {
+                self->recovery_key_requested = TRUE;
+                gst_pad_send_event(pad, gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0));
+            }
+            return GST_PAD_PROBE_DROP;
+        }
         GstBuffer *with_sei = vim4_hdr10_insert(original, &metadata,
             !self->have_metadata || memcmp(&metadata, &self->metadata, sizeof(metadata)));
         if (!with_sei) {
+            self->waiting_irap = TRUE;
+            self->recovery_key_requested = self->have_metadata = FALSE;
             GST_ELEMENT_ERROR(self, STREAM, DECODE, ("Invalid HEVC access unit or HDR SEI"), (NULL));
             return GST_PAD_PROBE_DROP;
         }
+        if (self->waiting_irap) GST_BUFFER_FLAG_SET(with_sei, GST_BUFFER_FLAG_DISCONT);
+        self->waiting_irap = self->recovery_key_requested = FALSE;
         self->metadata = metadata; self->have_metadata = TRUE;
         GST_PAD_PROBE_INFO_DATA(probe) = with_sei;
         gst_buffer_unref(original);
@@ -242,6 +259,7 @@ static void clear_chain(GstVim4H265Src *self)
     if (self->metadata_fd >= 0) close(self->metadata_fd);
     self->metadata_fd = -1;
     self->have_metadata = FALSE;
+    self->waiting_irap = self->recovery_key_requested = FALSE;
 }
 
 static GstPadProbeReturn capture_allocation(GstPad *pad, GstPadProbeInfo *probe, gpointer data)
