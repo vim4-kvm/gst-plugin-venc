@@ -139,7 +139,7 @@ static inline gchar *vim4_capture_rate_chain(const Vim4Input *input, guint ceili
             ceiling = ceiling ? MIN(ceiling, budget) : budget;
         }
         if (ceiling && (input->vrr < 0 || (guint)input->vrr > ceiling))
-            g_string_append_printf(chain, " ! videorate drop-only=true average-period=1 max-rate=%u ! "
+            g_string_append_printf(chain, " ! vim4ptsrate max-rate=%u ! "
                 "video/x-raw,framerate=%u/1 ! capssetter caps=\"video/x-raw,"
                 "framerate=(fraction)0/1,max-framerate=(fraction)%u/1\"", ceiling, ceiling, ceiling);
     } else {
@@ -148,7 +148,7 @@ static inline gchar *vim4_capture_rate_chain(const Vim4Input *input, guint ceili
         if (!input->enumerated)
             g_string_append_printf(chain, ",framerate=%d/%d", input->num, input->den);
         if (ceiling && input->num > (gint64)ceiling * input->den)
-            g_string_append_printf(chain, " ! videorate drop-only=true max-rate=%u", ceiling);
+            g_string_append_printf(chain, " ! vim4ptsrate max-rate=%u", ceiling);
     }
     return g_string_free(chain, FALSE);
 }

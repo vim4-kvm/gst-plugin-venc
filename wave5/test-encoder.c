@@ -137,11 +137,23 @@ static void capture_budget_follows_fixed_or_vtem_timing(void)
 
 static void variable_capture_keeps_source_pts(void)
 {
-    GstClockTime pts[341];
-    for (guint i = 0; i < G_N_ELEMENTS(pts); i++)
-        pts[i] = i < 100 ? i * GST_SECOND / 50 : 2 * GST_SECOND + (i - 100) * GST_SECOND / 120;
-    Vim4Input input = {.vrr=120, .den=1};
-    for (guint ceiling = 60; ceiling <= 120; ceiling += 60) {
+    GstClockTime pts[480];
+    const struct { guint hz, ceiling; gboolean variable; } cases[] = {
+        {0, 60, TRUE}, {0, 120, TRUE}, {120, 60, FALSE}, {60, 60, TRUE},
+    };
+    for (guint c = 0; c < G_N_ELEMENTS(cases); c++) {
+        guint hz = cases[c].hz, ceiling = cases[c].ceiling;
+        guint frames = hz ? 4 * hz : 341;
+        Vim4Input input = {.num=120, .den=1, .vrr=cases[c].variable ? 120 : 0};
+        for (guint i = 0; i < frames; i++) {
+            if (!hz) {
+                pts[i] = i < 100 ? i * GST_SECOND / 50 : 2 * GST_SECOND + (i - 100) * GST_SECOND / 120;
+            } else {
+                pts[i] = i * GST_SECOND / hz;
+                if (i % 3 == 1) pts[i] += 50 * GST_USECOND;
+                if (i % 3 == 2) pts[i] -= 50 * GST_USECOND;
+            }
+        }
         g_autofree gchar *rate = vim4_capture_rate_chain(&input, ceiling);
         g_autofree gchar *text = g_strdup_printf("appsrc name=in format=time "
             "caps=video/x-raw,format=NV12,width=16,height=16,framerate=120/1 ! "
@@ -152,7 +164,7 @@ static void variable_capture_keeps_source_pts(void)
         GstElement *src = gst_bin_get_by_name(GST_BIN(pipeline), "in");
         GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "end");
         gst_element_set_state(pipeline, GST_STATE_PLAYING);
-        for (guint i = 0; i < G_N_ELEMENTS(pts); i++) {
+        for (guint i = 0; i < frames; i++) {
             GstBuffer *frame = gst_buffer_new_allocate(NULL, 16 * 16 * 3 / 2, NULL);
             GST_BUFFER_PTS(frame) = pts[i];
             g_assert_cmpint(gst_app_src_push_buffer(GST_APP_SRC(src), frame), ==, GST_FLOW_OK);
@@ -162,14 +174,18 @@ static void variable_capture_keeps_source_pts(void)
         GstSample *sample;
         while ((sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), GST_SECOND))) {
             GstClockTime stamp = GST_BUFFER_PTS(gst_sample_get_buffer(sample));
-            while (i < G_N_ELEMENTS(pts) && pts[i] != stamp) i++;
-            g_assert_cmpuint(i, <, G_N_ELEMENTS(pts));
+            while (i < frames && pts[i] != stamp) i++;
+            g_assert_cmpuint(i, <, frames);
             if (stamp) seconds[(stamp - 1) / GST_SECOND]++;
             i++; count++;
             gst_sample_unref(sample);
         }
         g_assert_true(gst_app_sink_is_eos(GST_APP_SINK(sink)));
-        if (ceiling == 120) g_assert_cmpuint(count, ==, G_N_ELEMENTS(pts));
+        if (hz) {
+            g_test_message("jittered %u Hz: %u frames in four seconds", hz, count);
+            g_assert_cmpuint(count, >=, 239);
+            g_assert_cmpuint(count, <=, 241);
+        } else if (ceiling == 120) g_assert_cmpuint(count, ==, frames);
         else for (guint second = 0; second < G_N_ELEMENTS(seconds); second++) {
             g_test_message("second %u: %u frames", second, seconds[second]);
             g_assert_cmpuint(seconds[second], >=, 49);

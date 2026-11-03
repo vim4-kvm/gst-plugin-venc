@@ -138,10 +138,10 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
      * firmware budget. An unavailable source query also takes the safe path. */
     GstElement *last = self->planes;
     if (limit_qhd_avc) {
-        self->rate_limit = gst_element_factory_make("videorate", NULL);
+        self->rate_limit = gst_element_factory_make("vim4ptsrate", NULL);
         if (self->rate_limit) {
             gst_bin_add(GST_BIN(self), self->rate_limit);
-            g_object_set(self->rate_limit, "drop-only", TRUE, "average-period", (guint64)1, "max-rate", 60, NULL);
+            g_object_set(self->rate_limit, "max-rate", 60, NULL);
         }
         if (!self->rate_limit || !gst_element_link(self->planes, self->rate_limit)) {
             GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot limit QHD AVC to 60 fps"), (NULL));
