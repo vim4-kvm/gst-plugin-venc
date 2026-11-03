@@ -108,14 +108,19 @@ static inline gboolean vim4_input_timings(const gchar *path, Vim4Input *input, g
     return TRUE;
 }
 
+static inline guint vim4_input_budget(const Vim4Input *input)
+{
+    /* Unknown Gaming VRR base: use the local 60 fps output policy. */
+    if (input->vrr) return (input->vrr > 0 ? input->vrr : 60) * 100;
+    return gst_util_uint64_scale_round(input->num, 100, input->den);
+}
+
 static inline guint vim4_input_rate(void)
 {
     g_autofree gchar *path = vim4_video_device("t7-vdin-test");
     Vim4Input input;
     if (!path || !vim4_input_timings(path, &input, FALSE)) return 0;
-    /* A locked input with no VTEM base uses a local 60 fps output budget. */
-    if (input.vrr) return (input.vrr > 0 ? input.vrr : 60) * 100;
-    return gst_util_uint64_scale_round(input.num, 100, input.den);
+    return vim4_input_budget(&input);
 }
 
 /* The V4L2 source can only see the sampled frame interval. Relabel VRR at
@@ -129,8 +134,10 @@ static inline gchar *vim4_capture_rate_chain(const Vim4Input *input, guint ceili
         if (input->vrr > 0)
             g_string_append_printf(chain, ",max-framerate=(fraction)%d/1", input->vrr);
         g_string_append_c(chain, '"');
-        if (input->vrr < 0)
-            ceiling = ceiling ? MIN(ceiling, 60u) : 60;
+        if (input->vrr < 0) {
+            guint budget = vim4_input_budget(input) / 100;
+            ceiling = ceiling ? MIN(ceiling, budget) : budget;
+        }
         if (ceiling && (input->vrr < 0 || (guint)input->vrr > ceiling))
             g_string_append_printf(chain, " ! videorate drop-only=true average-period=1 max-rate=%u ! "
                 "video/x-raw,framerate=%u/1 ! capssetter caps=\"video/x-raw,"

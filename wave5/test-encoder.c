@@ -100,9 +100,12 @@ static void capture_budget_follows_fixed_or_vtem_timing(void)
         {59999,1000,0,60,59999,1000,0}, {1199,10,0,120,1199,10,0},
         {60,1,0,120,60,1,0}, {120,1,0,60,60,1,0}, {60,1,0,10,10,1,0},
         {0,1,120,120,0,1,120}, {0,1,120,60,0,1,60}, {0,1,-1,0,0,1,60},
+        {0,1,-1,120,0,1,60}, {0,1,-1,10,0,1,10},
     };
     for (guint i = 0; i < G_N_ELEMENTS(modes); i++) {
         Vim4Input input = {.num=modes[i].num, .den=modes[i].den, .vrr=modes[i].vrr};
+        if (input.vrr == -1)
+            g_assert_cmpuint(vim4_input_budget(&input), ==, 6000);
         g_autofree gchar *rate = vim4_capture_rate_chain(&input, modes[i].ceiling);
         g_autofree gchar *text = g_strdup_printf("videotestsrc num-buffers=12 ! "
             "capsfilter caps=video/x-raw,format=NV12,width=64,height=32%s ! fakesink name=end", rate);
