@@ -48,22 +48,31 @@ static void fake_encoder_init(FakeEncoder *self)
 }
 static void configure_profiles(void)
 {
-    const char *profiles[] = {"main", "main-10"};
-    for (guint tenbit = 0; tenbit < 2; tenbit++) {
+    const char *formats[] = {"video/x-h264", "video/x-h265,profile=main", "video/x-h265,profile=main-10"};
+    for (guint i = 0; i < G_N_ELEMENTS(formats); i++) {
         GstElement *pipeline = gst_pipeline_new(NULL);
         GstVim4Wave5Enc *encoder = g_object_new(gst_vim4_wave5_enc_get_type(), NULL);
         GstElement *filter = gst_element_factory_make("capsfilter", NULL);
-        gchar *text = g_strdup_printf("video/x-h265,profile=%s", profiles[tenbit]);
-        GstCaps *caps = gst_caps_from_string(text); g_free(text);
+        GstCaps *caps = gst_caps_from_string(formats[i]);
         g_object_set(filter, "caps", caps, NULL); gst_caps_unref(caps);
         gst_bin_add_many(GST_BIN(pipeline), GST_ELEMENT(encoder), filter, NULL);
         g_assert_true(gst_element_link(GST_ELEMENT(encoder), filter));
         g_assert_true(configure(encoder, "/dev/mock-wave5"));
         FakeEncoder *hardware = (FakeEncoder *)encoder->encoder;
-        gint profile;
-        g_assert_true(gst_structure_get_int(hardware->controls, "hevc_profile", &profile));
-        g_assert_cmpint(profile, ==, tenbit ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
-        if (tenbit) {
+        gint refresh, block_rc, value;
+        g_assert_true(gst_structure_get_int(hardware->controls, "intra_refresh_period", &refresh));
+        g_assert_true(gst_structure_get_int(hardware->controls, "h264_mb_level_rate_control", &block_rc));
+        g_assert_cmpint(refresh, ==, i == 0 ? 45 : 0);
+        g_assert_cmpint(block_rc, ==, i == 0);
+        if (i == 0) {
+            g_assert_false(gst_structure_has_field(hardware->controls, "h264_i_frame_minimum_qp_value"));
+        } else {
+            g_assert_true(gst_structure_get_int(hardware->controls, "hevc_i_frame_minimum_qp_value", &value));
+            g_assert_cmpint(value, ==, 26);
+            g_assert_true(gst_structure_get_int(hardware->controls, "hevc_profile", &value));
+            g_assert_cmpint(value, ==, i == 2 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
+        }
+        if (i == 2) {
             GstPad *sink = gst_element_get_static_pad(encoder->planes, "sink");
             caps = gst_pad_query_caps(sink, NULL);
             GstCaps *p010 = gst_caps_from_string("video/x-raw,format=P010_10LE");
