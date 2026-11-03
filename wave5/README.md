@@ -27,5 +27,7 @@ Build and offline checks: `make test` on Linux with GStreamer development packag
 Plane tests cover physical UV offsets, allocation bounds, metadata and lease retention.
 Hardware tests still need the matched VIM4 kernel, firmware and the private patched
 V4L2 plugin built by `packaging/kernel-edge/build-gstreamer.py` in the parent workspace.
-Install these plugins in the mainline-only plugin directory; keep the vendor
-`vfmcapsrc` / `amlvenc` factories for 5.15. Device numbers must never be hard-coded.
+Install the Wave5 and patched V4L2 plugins in the mainline plugin directory.
+Install `libgstvim4rate.so` on the GStreamer search path for both 5.15 and 7.3.
+Its `vim4ptsrate max-rate=N` element drops by capture timestamp before videorate
+negotiates the encoder budget. The vendor runtime uses `vfmcapsrc` and `amlvenc`.
