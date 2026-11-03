@@ -99,7 +99,7 @@ static void capture_budget_follows_fixed_or_vtem_timing(void)
     } modes[] = {
         {59999,1000,0,60,59999,1000,0}, {1199,10,0,120,1199,10,0},
         {60,1,0,120,60,1,0}, {120,1,0,60,60,1,0}, {60,1,0,10,10,1,0},
-        {0,1,120,120,0,1,120}, {0,1,120,60,0,1,60}, {0,1,-1,0,0,1,0},
+        {0,1,120,120,0,1,120}, {0,1,120,60,0,1,60}, {0,1,-1,0,0,1,60},
     };
     for (guint i = 0; i < G_N_ELEMENTS(modes); i++) {
         Vim4Input input = {.num=modes[i].num, .den=modes[i].den, .vrr=modes[i].vrr};
@@ -134,7 +134,9 @@ static void capture_budget_follows_fixed_or_vtem_timing(void)
 
 static void variable_capture_keeps_source_pts(void)
 {
-    const GstClockTime pts[] = {0, 8333333, 16666667, 37074830, 57482993, 65816326, 74149659};
+    GstClockTime pts[341];
+    for (guint i = 0; i < G_N_ELEMENTS(pts); i++)
+        pts[i] = i < 100 ? i * GST_SECOND / 50 : 2 * GST_SECOND + (i - 100) * GST_SECOND / 120;
     Vim4Input input = {.vrr=120, .den=1};
     for (guint ceiling = 60; ceiling <= 120; ceiling += 60) {
         g_autofree gchar *rate = vim4_capture_rate_chain(&input, ceiling);
@@ -153,18 +155,23 @@ static void variable_capture_keeps_source_pts(void)
             g_assert_cmpint(gst_app_src_push_buffer(GST_APP_SRC(src), frame), ==, GST_FLOW_OK);
         }
         gst_app_src_end_of_stream(GST_APP_SRC(src));
-        guint count = 0, i = 0;
+        guint count = 0, i = 0, seconds[4] = {0};
         GstSample *sample;
         while ((sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), GST_SECOND))) {
             GstClockTime stamp = GST_BUFFER_PTS(gst_sample_get_buffer(sample));
             while (i < G_N_ELEMENTS(pts) && pts[i] != stamp) i++;
             g_assert_cmpuint(i, <, G_N_ELEMENTS(pts));
+            if (stamp) seconds[(stamp - 1) / GST_SECOND]++;
             i++; count++;
             gst_sample_unref(sample);
         }
         g_assert_true(gst_app_sink_is_eos(GST_APP_SINK(sink)));
         if (ceiling == 120) g_assert_cmpuint(count, ==, G_N_ELEMENTS(pts));
-        else { g_assert_cmpuint(count, >=, 3); g_assert_cmpuint(count, <, G_N_ELEMENTS(pts)); }
+        else for (guint second = 0; second < G_N_ELEMENTS(seconds); second++) {
+            g_test_message("second %u: %u frames", second, seconds[second]);
+            g_assert_cmpuint(seconds[second], >=, 49);
+            g_assert_cmpuint(seconds[second], <=, ceiling);
+        }
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(src); gst_object_unref(sink); gst_object_unref(pipeline);
     }

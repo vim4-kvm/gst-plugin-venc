@@ -116,7 +116,7 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
     } else {
         g_autofree gchar *path = vim4_video_device("t7-vdin-test");
         Vim4Input input;
-        gboolean known = path && vim4_input_timings(path, &input);
+        gboolean known = path && vim4_input_timings(path, &input, FALSE);
         gboolean high_rate = known && (input.vrr > 60 || input.num > (gint64)60 * input.den);
         limit_qhd_avc = !known || ((high_rate || input.vrr < 0) &&
             input.timings.bt.width == 2560 && input.timings.bt.height == 1440);
@@ -141,7 +141,7 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         self->rate_limit = gst_element_factory_make("videorate", NULL);
         if (self->rate_limit) {
             gst_bin_add(GST_BIN(self), self->rate_limit);
-            g_object_set(self->rate_limit, "drop-only", TRUE, "max-rate", 60, NULL);
+            g_object_set(self->rate_limit, "drop-only", TRUE, "average-period", (guint64)1, "max-rate", 60, NULL);
         }
         if (!self->rate_limit || !gst_element_link(self->planes, self->rate_limit)) {
             GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot limit QHD AVC to 60 fps"), (NULL));

@@ -73,9 +73,10 @@ typedef struct {
     struct v4l2_dv_timings timings;
     gint num, den;       /* Measured fixed rate, or 0/1 for Gaming VRR. */
     gint vrr;            /* 0 fixed, -1 unknown base, positive base in Hz. */
+    gboolean enumerated; /* v4l2src can negotiate its own measured fraction. */
 } Vim4Input;
 
-static inline gboolean vim4_input_timings(const gchar *path, Vim4Input *input)
+static inline gboolean vim4_input_timings(const gchar *path, Vim4Input *input, gboolean probe_intervals)
 {
     int fd = open(path, O_RDWR | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return FALSE;
@@ -87,6 +88,14 @@ static inline gboolean vim4_input_timings(const gchar *path, Vim4Input *input)
         input->vrr = ctrl.value;
     else if (ok && errno != ENOTTY && errno != EINVAL)
         ok = FALSE;
+    if (ok && !input->vrr && probe_intervals) {
+        struct v4l2_frmivalenum interval = {
+            .pixel_format = V4L2_PIX_FMT_NV12,
+            .width = input->timings.bt.width, .height = input->timings.bt.height,
+        };
+        input->enumerated = ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &interval) == 0 &&
+            interval.type == V4L2_FRMIVAL_TYPE_DISCRETE;
+    }
     close(fd);
     if (!ok || input->vrr) return ok;
     const struct v4l2_bt_timings *bt = &input->timings.bt;
@@ -103,8 +112,9 @@ static inline guint vim4_input_rate(void)
 {
     g_autofree gchar *path = vim4_video_device("t7-vdin-test");
     Vim4Input input;
-    if (!path || !vim4_input_timings(path, &input)) return 0;
-    if (input.vrr) return MAX(0, input.vrr) * 100;
+    if (!path || !vim4_input_timings(path, &input, FALSE)) return 0;
+    /* A locked input with no VTEM base uses a local 60 fps output budget. */
+    if (input.vrr) return (input.vrr > 0 ? input.vrr : 60) * 100;
     return gst_util_uint64_scale_round(input.num, 100, input.den);
 }
 
@@ -119,12 +129,17 @@ static inline gchar *vim4_capture_rate_chain(const Vim4Input *input, guint ceili
         if (input->vrr > 0)
             g_string_append_printf(chain, ",max-framerate=(fraction)%d/1", input->vrr);
         g_string_append_c(chain, '"');
+        if (input->vrr < 0)
+            ceiling = ceiling ? MIN(ceiling, 60u) : 60;
         if (ceiling && (input->vrr < 0 || (guint)input->vrr > ceiling))
-            g_string_append_printf(chain, " ! videorate drop-only=true max-rate=%u ! "
+            g_string_append_printf(chain, " ! videorate drop-only=true average-period=1 max-rate=%u ! "
                 "video/x-raw,framerate=%u/1 ! capssetter caps=\"video/x-raw,"
                 "framerate=(fraction)0/1,max-framerate=(fraction)%u/1\"", ceiling, ceiling, ceiling);
     } else {
-        g_string_append_printf(chain, ",framerate=%d/%d", input->num, input->den);
+        /* Two readings of the RX counter may differ by a tick. On kernels
+         * with enumeration let v4l2src use the fraction from its own probe. */
+        if (!input->enumerated)
+            g_string_append_printf(chain, ",framerate=%d/%d", input->num, input->den);
         if (ceiling && input->num > (gint64)ceiling * input->den)
             g_string_append_printf(chain, " ! videorate drop-only=true max-rate=%u", ceiling);
     }
