@@ -427,7 +427,7 @@ static void gst_vim4_h265_src_class_init(GstVim4H265SrcClass *klass)
     g_object_class_install_property(object, PROP_FRAMERATE, g_param_spec_uint(
         "framerate", "Framerate", "Drop-only output and encoder budget", 1, 120, 60, flags));
     g_object_class_install_property(object, PROP_GOP, g_param_spec_uint(
-        "gop", "GOP", "SDR GOP; Main10 uses gradual refresh and explicit IDR", 0, 1000, 120, flags));
+        "gop", "GOP", "HEVC GOP (Wave5: zero disables cyclic refresh and emits IDRs on request; vendor Main10 uses gradual refresh)", 0, 1000, 120, flags));
     g_object_class_install_property(object, PROP_HEIGHT, g_param_spec_uint(
         "height", "Height", "Output height; zero preserves input geometry", 0, 2160, 0, flags));
     g_object_class_install_property(object, PROP_QP_MAX, g_param_spec_int(

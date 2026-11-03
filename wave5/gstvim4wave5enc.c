@@ -184,7 +184,7 @@ static void gst_vim4_wave5_enc_class_init(GstVim4Wave5EncClass *klass)
     g_object_class_install_property(object, PROP_BITRATE, g_param_spec_int("bitrate", "Bitrate",
         "Target bitrate in kbps", 1000, 60000, 12000, flags));
     g_object_class_install_property(object, PROP_GOP, g_param_spec_int("gop", "GOP",
-        "Keyframe period; zero emits keyframes on request", 0, 10000, 0, flags));
+        "Keyframe period (zero: AVC refresh period 45, HEVC refresh off, IDRs on request)", 0, 10000, 0, flags));
     g_object_class_install_property(object, PROP_FRAMERATE, g_param_spec_int("framerate", "Frame rate",
         "Compatibility budget hint; actual timing follows negotiated capture caps", 0, 120, 0, flags));
     g_object_class_install_property(object, PROP_KEY_INTERVAL, g_param_spec_uint64("min-force-key-unit-interval",
