@@ -73,24 +73,6 @@ static void configure_profiles(void)
         clear_children(encoder); gst_object_unref(pipeline);
     }
 }
-static void avc_without_receiver_is_limited(void)
-{
-    GstElement *pipeline = gst_pipeline_new(NULL);
-    GstVim4Wave5Enc *encoder = g_object_new(gst_vim4_wave5_enc_get_type(), NULL);
-    GstElement *filter = gst_element_factory_make("capsfilter", NULL);
-    GstCaps *caps = gst_caps_from_string("video/x-h264");
-    g_object_set(filter, "caps", caps, NULL);
-    gst_caps_unref(caps);
-    gst_bin_add_many(GST_BIN(pipeline), GST_ELEMENT(encoder), filter, NULL);
-    g_assert_true(gst_element_link(GST_ELEMENT(encoder), filter));
-    g_assert_true(configure(encoder, "/dev/mock-wave5"));
-    g_assert_nonnull(encoder->rate_limit);
-    gint maximum;
-    g_object_get(encoder->rate_limit, "max-rate", &maximum, NULL);
-    g_assert_cmpint(maximum, ==, 60);
-    clear_children(encoder);
-    gst_object_unref(pipeline);
-}
 
 static void capture_budget_follows_fixed_or_vtem_timing(void)
 {
@@ -138,8 +120,9 @@ static void capture_budget_follows_fixed_or_vtem_timing(void)
 static void variable_capture_keeps_source_pts(void)
 {
     GstClockTime pts[480];
-    const struct { guint hz, ceiling; gboolean variable; } cases[] = {
-        {0, 60, TRUE}, {0, 120, TRUE}, {120, 60, FALSE}, {60, 60, TRUE},
+    const struct { guint hz, ceiling; gboolean variable, jpeg_branch; } cases[] = {
+        {0, 60, TRUE, FALSE}, {0, 120, TRUE, FALSE}, {120, 60, FALSE, FALSE},
+        {60, 60, TRUE, FALSE}, {120, 60, FALSE, TRUE},
     };
     for (guint c = 0; c < G_N_ELEMENTS(cases); c++) {
         guint hz = cases[c].hz, ceiling = cases[c].ceiling;
@@ -156,8 +139,9 @@ static void variable_capture_keeps_source_pts(void)
         }
         g_autofree gchar *rate = vim4_capture_rate_chain(&input, ceiling);
         g_autofree gchar *text = g_strdup_printf("appsrc name=in format=time "
-            "caps=video/x-raw,format=NV12,width=16,height=16,framerate=120/1 ! "
-            "capsfilter caps=video/x-raw,format=NV12%s ! appsink name=end sync=false", rate);
+            "caps=video/x-raw,format=NV12,width=16,height=16,framerate=%d/1 ! "
+            "capsfilter caps=video/x-raw,format=NV12%s%s ! appsink name=end sync=false",
+            input.vrr ? 0 : input.num, rate, cases[c].jpeg_branch ? " ! vim4ptsrate max-rate=30" : "");
         GError *error = NULL;
         GstElement *pipeline = gst_parse_launch(text, &error);
         g_assert_no_error(error);
@@ -183,8 +167,9 @@ static void variable_capture_keeps_source_pts(void)
         g_assert_true(gst_app_sink_is_eos(GST_APP_SINK(sink)));
         if (hz) {
             g_test_message("jittered %u Hz: %u frames in four seconds", hz, count);
-            g_assert_cmpuint(count, >=, 239);
-            g_assert_cmpuint(count, <=, 241);
+            guint expected = 4 * (cases[c].jpeg_branch ? 30 : ceiling);
+            g_assert_cmpuint(count, >=, expected - 1);
+            g_assert_cmpuint(count, <=, expected + 1);
         } else if (ceiling == 120) g_assert_cmpuint(count, ==, frames);
         else for (guint second = 0; second < G_N_ELEMENTS(seconds); second++) {
             g_test_message("second %u: %u frames", second, seconds[second]);
@@ -201,7 +186,7 @@ int main(int argc, char **argv)
     gst_init(&argc, &argv); g_test_init(&argc, &argv, NULL);
     g_assert_true(gst_element_register(NULL, "v4l2h265enc", GST_RANK_NONE, fake_encoder_get_type()));
     g_assert_true(gst_element_register(NULL, "v4l2h264enc", GST_RANK_NONE, fake_encoder_get_type()));
-    g_test_add_func("/wave5/unknown-input-avc-limit", avc_without_receiver_is_limited);
+
     g_test_add_func("/wave5/capture-budget", capture_budget_follows_fixed_or_vtem_timing);
     g_test_add_func("/wave5/variable-capture-pts", variable_capture_keeps_source_pts);
     g_test_add_func("/wave5/negotiated-profile-controls", configure_profiles);

@@ -36,7 +36,7 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
     if (transition == GST_STATE_CHANGE_NULL_TO_READY) {
         g_autofree gchar *device = vim4_video_device("t7-vdin-test");
         Vim4Input input;
-        if (!device || !vim4_input_timings(device, &input, TRUE)) {
+        if (!device || !vim4_input_timings(device, &input)) {
             GST_ELEMENT_ERROR(element, RESOURCE, NOT_FOUND, ("VIM4 HDMI input is unavailable"), (NULL));
             return GST_STATE_CHANGE_FAILURE;
         }

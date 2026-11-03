@@ -4,8 +4,8 @@
 DMA buffers. Its optional `height` property asks VDIN to downscale while preserving
 aspect ratio. `input-rate` reports the capture budget in hundredths of a frame per second.
 For a fixed input it follows measured DV timings. Gaming VRR uses the read-only
-`V4L2_CID_USER_T7_VDIN_VRR_RATE` control (Hz) and reports zero budget when the
-base is unknown. Raw VRR caps carry `framerate=0/1` and a known `max-framerate`.
+`V4L2_CID_USER_T7_VDIN_VRR_RATE` control (Hz). A locked source with unknown base
+uses a local 60 fps budget. Raw VRR caps carry `framerate=0/1` and `max-framerate`.
 `max-fps` limits capture output only when needed. At the encoder input the DMA
 adapter labels the firmware budget in whole fps while preserving buffer PTS.
 
@@ -29,5 +29,5 @@ Hardware tests still need the matched VIM4 kernel, firmware and the private patc
 V4L2 plugin built by `packaging/kernel-edge/build-gstreamer.py` in the parent workspace.
 Install the Wave5 and patched V4L2 plugins in the mainline plugin directory.
 Install `libgstvim4rate.so` on the GStreamer search path for both 5.15 and 7.3.
-Its `vim4ptsrate max-rate=N` element drops by capture timestamp before videorate
-negotiates the encoder budget. The vendor runtime uses `vfmcapsrc` and `amlvenc`.
+`vim4ptsrate max-rate=N` uses capture PTS to limit delivery. It preserves lower fixed
+fractions and publishes a maximum rate for variable input.

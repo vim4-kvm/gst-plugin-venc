@@ -116,14 +116,12 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
     } else {
         g_autofree gchar *path = vim4_video_device("t7-vdin-test");
         Vim4Input input;
-        gboolean known = path && vim4_input_timings(path, &input, FALSE);
-        gboolean high_rate = known && (input.vrr > 60 || input.num > (gint64)60 * input.den);
-        limit_qhd_avc = !known || ((high_rate || input.vrr < 0) &&
-            input.timings.bt.width == 2560 && input.timings.bt.height == 1440);
-        if (!known)
-            GST_WARNING_OBJECT(self, "Input timings unavailable; limiting AVC to 60 fps");
-        if (high_rate) {
-            gst_structure_set(controls, "h264_level", G_TYPE_INT, V4L2_MPEG_VIDEO_H264_LEVEL_5_1, NULL);
+        if (path && vim4_input_timings(path, &input)) {
+            gboolean high_rate = input.vrr > 60 || input.num > (gint64)60 * input.den;
+            limit_qhd_avc = (high_rate || input.vrr) && input.timings.bt.width == 2560 &&
+                input.timings.bt.height == 1440;
+            if (high_rate)
+                gst_structure_set(controls, "h264_level", G_TYPE_INT, V4L2_MPEG_VIDEO_H264_LEVEL_5_1, NULL);
         }
     }
     g_object_set(self->encoder, "output-io-mode", 5, "extra-controls", controls,
@@ -134,24 +132,14 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         gst_caps_from_string("video/x-h264");
     g_object_set(self->encoded_caps, "caps", caps, NULL);
     gst_caps_unref(caps);
-    /* Limit after the plane adapter translates VFR/fractional caps into a
-     * firmware budget. An unavailable source query also takes the safe path. */
     GstElement *last = self->planes;
     if (limit_qhd_avc) {
-        self->rate_limit = gst_element_factory_make("vim4ptsrate", NULL);
-        if (self->rate_limit) {
-            gst_bin_add(GST_BIN(self), self->rate_limit);
-            g_object_set(self->rate_limit, "max-rate", 60, NULL);
-        }
-        if (!self->rate_limit || !gst_element_link(self->planes, self->rate_limit)) {
-            GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot limit QHD AVC to 60 fps"), (NULL));
-            clear_children(self);
-            return FALSE;
-        }
-        GST_INFO_OBJECT(self, "Limiting QHD AVC to 60 fps for level 5.1");
+        self->rate_limit = gst_element_factory_make_full("vim4ptsrate", "max-rate", 60, NULL);
+        if (self->rate_limit) gst_bin_add(GST_BIN(self), self->rate_limit);
         last = self->rate_limit;
     }
-    if (!gst_element_link_many(last, self->encoder, self->encoded_caps, NULL)) {
+    if (!last || (limit_qhd_avc && !gst_element_link(self->planes, last)) ||
+        !gst_element_link_many(last, self->encoder, self->encoded_caps, NULL)) {
         GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot link Wave5 plane import and encoder"), (NULL));
         clear_children(self);
         return FALSE;
