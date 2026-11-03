@@ -106,10 +106,14 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
     GstStructure *controls = gst_structure_new("controls",
         "video_bitrate", G_TYPE_INT, self->bitrate * 1000,
         "video_gop_size", G_TYPE_INT, self->gop,
-        "intra_refresh_period", G_TYPE_INT, self->gop ? 0 : 45,
+        "intra_refresh_period", G_TYPE_INT, 0,
         "frame_level_rate_control_enable", G_TYPE_INT, 1,
         "h264_mb_level_rate_control", G_TYPE_INT, 1, NULL);
     gboolean limit_qhd_avc = FALSE;
+    /* After static skips, an unconstrained recovery IDR can overwhelm the receiver. */
+    if (!self->gop)
+        gst_structure_set(controls, hevc ? "hevc_i_frame_minimum_qp_value" : "h264_i_frame_minimum_qp_value",
+            G_TYPE_INT, 26, NULL);
     if (hevc) {
         gst_structure_set(controls, "hevc_level", G_TYPE_INT, 8, "hevc_profile", G_TYPE_INT,
             main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
@@ -180,7 +184,7 @@ static void gst_vim4_wave5_enc_class_init(GstVim4Wave5EncClass *klass)
     g_object_class_install_property(object, PROP_BITRATE, g_param_spec_int("bitrate", "Bitrate",
         "Target bitrate in kbps", 1000, 60000, 12000, flags));
     g_object_class_install_property(object, PROP_GOP, g_param_spec_int("gop", "GOP",
-        "Keyframe period; zero uses cyclic refresh", 0, 10000, 0, flags));
+        "Keyframe period; zero emits keyframes on request", 0, 10000, 0, flags));
     g_object_class_install_property(object, PROP_FRAMERATE, g_param_spec_int("framerate", "Frame rate",
         "Compatibility budget hint; actual timing follows negotiated capture caps", 0, 120, 0, flags));
     g_object_class_install_property(object, PROP_KEY_INTERVAL, g_param_spec_uint64("min-force-key-unit-interval",
