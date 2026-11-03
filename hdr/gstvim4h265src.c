@@ -144,6 +144,7 @@ static gchar *description(GstVim4H265Src *self, gboolean hdr)
 {
     guint height = self->height ? MAX(self->height & ~1u, 2) : 0;
     if (self->wave5) {
+        guint fps = hdr ? MIN(self->framerate, 60u) : self->framerate;
         return g_strdup_printf(
             "%s name=capture height=%u ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! "
             "videorate %s ! video/x-raw,format=%s,framerate=%u/1%s ! "
@@ -152,9 +153,9 @@ static gchar *description(GstVim4H265Src *self, gboolean hdr)
             "video/x-h265,profile=%s ! h265parse config-interval=-1 ! "
             "capsfilter caps=\"video/x-h265,stream-format=byte-stream,alignment=au,profile=%s\"",
             hdr ? "vim4amlysrc" : "vim4v4l2src", height,
-            hdr ? "" : "drop-only=true", hdr ? "P010_10LE" : "NV12", self->framerate,
+            hdr ? "" : "drop-only=true", hdr ? "P010_10LE" : "NV12", fps,
             hdr ? ",colorimetry=bt2100-pq" : ",colorimetry=bt709", self->bitrate,
-            self->gop, self->framerate, hdr ? "main-10" : "main", hdr ? "main-10" : "main");
+            self->gop, fps, hdr ? "main-10" : "main", hdr ? "main-10" : "main");
     }
     if (hdr) {
         /* The capture converter derives the even aspect-preserving width and

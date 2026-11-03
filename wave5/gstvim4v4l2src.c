@@ -33,7 +33,9 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
     if (transition == GST_STATE_CHANGE_NULL_TO_READY) {
         struct v4l2_dv_timings timings;
         gchar *device = vim4_video_device("t7-vdin-test");
-        if (!device || !self->source || !self->filter || !vim4_input_timings(&timings)) {
+        gint rate_num, rate_den;
+        if (!device || !self->source || !self->filter ||
+            !vim4_input_timings(device, &timings, &rate_num, &rate_den)) {
             g_free(device);
             GST_ELEMENT_ERROR(element, RESOURCE, NOT_FOUND, ("VIM4 HDMI capture or input signal is unavailable"), (NULL));
             return GST_STATE_CHANGE_FAILURE;
@@ -45,7 +47,7 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
         }
         GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
             "width", G_TYPE_INT, width, "height", G_TYPE_INT, height,
-            "framerate", GST_TYPE_FRACTION, 60, 1, NULL);
+            "framerate", GST_TYPE_FRACTION, rate_num, rate_den, NULL);
         g_object_set(self->source, "device", device, "io-mode", 4, "num-buffers", self->num_buffers, NULL);
         g_object_set(self->filter, "caps", caps, NULL);
         gst_caps_unref(caps); g_free(device);
@@ -64,7 +66,7 @@ static void gst_vim4_v4l2_src_class_init(GstVim4V4l2SrcClass *klass)
         "Capture limit; minus one is unlimited", -1, G_MAXINT, -1,
         G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS));
     g_object_class_install_property(object, PROP_INPUT_RATE, g_param_spec_int("input-rate", "HDMI rate",
-        "Measured input rate in hundredths of a frame per second; zero without signal", 0, 12000, 0,
+        "Capture budget in hundredths of a frame per second; zero without signal", 0, 12000, 0,
         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
     GstElementClass *element = GST_ELEMENT_CLASS(klass);
     element->change_state = change_state;

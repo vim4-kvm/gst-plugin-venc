@@ -2,6 +2,7 @@
 #pragma once
 #include <gst/gst.h>
 #include <linux/videodev2.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -63,26 +64,44 @@ static inline gchar *vim4_encoder_device(void)
     return result;
 }
 
-static inline gboolean vim4_input_timings(struct v4l2_dv_timings *timings)
+static inline gboolean vim4_timing_rate(const struct v4l2_bt_timings *bt, struct v4l2_fract interval,
+                                        gint *num, gint *den)
 {
-    gchar *path = vim4_video_device("t7-vdin-test");
-    if (!path) return FALSE;
+    guint64 width = (guint64)bt->width + bt->hfrontporch + bt->hsync + bt->hbackporch;
+    guint64 height = (guint64)bt->height + bt->vfrontporch + bt->vsync + bt->vbackporch;
+    if (!width || !height || !bt->pixelclock) return FALSE;
+    gdouble rate = (gdouble)bt->pixelclock / width / height;
+    /* A VRR base interval is integral. For a fixed source use the pixel
+     * clock and totals from one DV snapshot, including fractional rates. */
+    if (interval.numerator == 1 && interval.denominator)
+        rate = interval.denominator;
+    if (rate < 20 || rate > 120.001) return FALSE;
+    gst_util_double_to_fraction(MIN(rate, 120.0), num, den);
+    return TRUE;
+}
+
+static inline gboolean vim4_input_timings(const gchar *path, struct v4l2_dv_timings *timings,
+                                          gint *rate_num, gint *rate_den)
+{
+    struct v4l2_streamparm parm = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     int fd = open(path, O_RDWR | O_CLOEXEC | O_NONBLOCK);
-    g_free(path);
     if (fd < 0) return FALSE;
     memset(timings, 0, sizeof(*timings));
     gboolean ok = ioctl(fd, VIDIOC_QUERY_DV_TIMINGS, timings) == 0 &&
         timings->type == V4L2_DV_BT_656_1120 && !timings->bt.interlaced;
+    if (ok && ioctl(fd, VIDIOC_G_PARM, &parm) < 0 && errno != ENOTTY && errno != EINVAL)
+        ok = FALSE;
+    if (ok)
+        ok = vim4_timing_rate(&timings->bt, parm.parm.capture.timeperframe, rate_num, rate_den);
     close(fd);
     return ok;
 }
 
 static inline guint vim4_input_rate(void)
 {
+    g_autofree gchar *path = vim4_video_device("t7-vdin-test");
     struct v4l2_dv_timings timings;
-    if (!vim4_input_timings(&timings)) return 0;
-    const struct v4l2_bt_timings *bt = &timings.bt;
-    guint64 width = (guint64)bt->width + bt->hfrontporch + bt->hsync + bt->hbackporch;
-    guint64 height = (guint64)bt->height + bt->vfrontporch + bt->vsync + bt->vbackporch;
-    return width && height ? (bt->pixelclock * 100 + width * height / 2) / (width * height) : 0;
+    gint num, den;
+    if (!path || !vim4_input_timings(path, &timings, &num, &den)) return 0;
+    return gst_util_uint64_scale_round(num, 100, den);
 }

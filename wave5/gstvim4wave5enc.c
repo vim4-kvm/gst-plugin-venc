@@ -4,7 +4,7 @@
 
 typedef struct {
     GstBin parent;
-    GstElement *planes, *encoder, *encoded_caps;
+    GstElement *rate_limit, *planes, *encoder, *encoded_caps;
     GstPad *sink, *src;
     gint bitrate, gop, framerate;
     guint64 key_interval;
@@ -49,7 +49,7 @@ static void clear_children(GstVim4Wave5Enc *self)
 {
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->sink), NULL);
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->src), NULL);
-    GstElement **children[] = {&self->planes, &self->encoder, &self->encoded_caps};
+    GstElement **children[] = {&self->rate_limit, &self->planes, &self->encoder, &self->encoded_caps};
     for (guint i = 0; i < G_N_ELEMENTS(children); i++) {
         if (*children[i]) {
             gst_element_set_state(*children[i], GST_STATE_NULL);
@@ -109,8 +109,19 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         "intra_refresh_period", G_TYPE_INT, self->gop ? 0 : 45,
         "frame_level_rate_control_enable", G_TYPE_INT, 1,
         "h264_mb_level_rate_control", G_TYPE_INT, 1, NULL);
-    if (hevc) gst_structure_set(controls, "hevc_level", G_TYPE_INT, 8,
-        "hevc_profile", G_TYPE_INT, main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
+    gboolean limit_qhd_avc = FALSE;
+    if (hevc) {
+        gst_structure_set(controls, "hevc_level", G_TYPE_INT, 8, "hevc_profile", G_TYPE_INT,
+            main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
+    } else {
+        g_autofree gchar *path = vim4_video_device("t7-vdin-test");
+        struct v4l2_dv_timings timings;
+        gint num, den;
+        if (path && vim4_input_timings(path, &timings, &num, &den) && num > (gint64)61 * den) {
+            limit_qhd_avc = timings.bt.width == 2560 && timings.bt.height == 1440;
+            gst_structure_set(controls, "h264_level", G_TYPE_INT, V4L2_MPEG_VIDEO_H264_LEVEL_5_1, NULL);
+        }
+    }
     g_object_set(self->encoder, "output-io-mode", 5, "extra-controls", controls,
         "min-force-key-unit-interval", self->key_interval, NULL);
     gst_structure_free(controls);
@@ -124,7 +135,24 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         clear_children(self);
         return FALSE;
     }
-    GstPad *pad = gst_element_get_static_pad(self->planes, "sink");
+    /* QHD120 AVC exceeds Wave5's highest exposed AVC level (5.1).
+     * Leave the normal <=60 pipeline and its allocation path untouched. */
+    GstElement *first = self->planes;
+    if (limit_qhd_avc) {
+        self->rate_limit = gst_element_factory_make("videorate", NULL);
+        if (self->rate_limit) {
+            gst_bin_add(GST_BIN(self), self->rate_limit);
+            g_object_set(self->rate_limit, "drop-only", TRUE, "max-rate", 60, NULL);
+        }
+        if (!self->rate_limit || !gst_element_link(self->rate_limit, self->planes)) {
+            GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot limit QHD AVC to 60 fps"), (NULL));
+            clear_children(self);
+            return FALSE;
+        }
+        GST_INFO_OBJECT(self, "Limiting QHD AVC to 60 fps for level 5.1");
+        first = self->rate_limit;
+    }
+    GstPad *pad = gst_element_get_static_pad(first, "sink");
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->sink), pad);
     gst_object_unref(pad);
     pad = gst_element_get_static_pad(self->encoded_caps, "src");

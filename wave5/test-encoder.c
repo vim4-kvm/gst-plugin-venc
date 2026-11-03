@@ -71,10 +71,25 @@ static void configure_profiles(void)
         clear_children(encoder); gst_object_unref(pipeline);
     }
 }
+static void capture_budget_follows_fixed_or_vtem_timing(void)
+{
+    struct v4l2_bt_timings bt = {.width = 2560, .height = 1440, .pixelclock = 483000000,
+        .hfrontporch = 48, .hsync = 32, .hbackporch = 80, .vfrontporch = 3, .vsync = 5, .vbackporch = 33};
+    gint num, den;
+    g_assert_true(vim4_timing_rate(&bt, (struct v4l2_fract){0}, &num, &den));
+    g_assert_cmpfloat_with_epsilon((gdouble)num / den, 119.90, 0.01);
+    bt.vfrontporch += 1481;
+    g_assert_true(vim4_timing_rate(&bt, (struct v4l2_fract){1, 120}, &num, &den));
+    g_assert_cmpint(num, ==, 120 * den);
+    g_assert_true(vim4_timing_rate(&bt, (struct v4l2_fract){0}, &num, &den));
+    g_assert_cmpfloat_with_epsilon((gdouble)num / den, 59.95, 0.01);
+}
+
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv); g_test_init(&argc, &argv, NULL);
     g_assert_true(gst_element_register(NULL, "v4l2h265enc", GST_RANK_NONE, fake_encoder_get_type()));
+    g_test_add_func("/wave5/capture-budget", capture_budget_follows_fixed_or_vtem_timing);
     g_test_add_func("/wave5/negotiated-profile-controls", configure_profiles);
     return g_test_run();
 }
