@@ -10,8 +10,10 @@ uses a local 60 fps budget. Raw VRR caps carry `framerate=0/1` and `max-framerat
 adapter labels the firmware budget in whole fps while preserving buffer PTS.
 
 `vim4wave5enc` discovers the Wave5 encoder and selects H.264 or H.265 from downstream
-caps. `bitrate` is in kbps. At `gop=0`, AVC uses a 45-frame intra refresh period
-and HEVC disables cyclic refresh. Both emit IDRs on request. Positive GOP values
+caps. `bitrate` is in kbps. At `gop=0`, AVC and HEVC disable cyclic refresh and
+emit IDRs on request. Both use frame-level rate control with an I-frame QP floor
+of 26. After each AVC IDR the private V4L2 plugin sets the first P-frame QP floor
+to 12 and lowers it by one per frame until it reaches zero. Positive GOP values
 retain periodic keyframes. Force-key-unit events reach the V4L2 encoder.
 Bitrate and GOP are configured before starting; restart the pipeline to change them.
 Encoder discovery requires a unique streaming M2M device with HEVC CAPTURE;

@@ -62,10 +62,13 @@ static void configure_profiles(void)
         gint refresh, block_rc, value;
         g_assert_true(gst_structure_get_int(hardware->controls, "intra_refresh_period", &refresh));
         g_assert_true(gst_structure_get_int(hardware->controls, "h264_mb_level_rate_control", &block_rc));
-        g_assert_cmpint(refresh, ==, i == 0 ? 45 : 0);
-        g_assert_cmpint(block_rc, ==, i == 0);
+        g_assert_cmpint(refresh, ==, 0);
+        g_assert_cmpint(block_rc, ==, 0);
         if (i == 0) {
-            g_assert_false(gst_structure_has_field(hardware->controls, "h264_i_frame_minimum_qp_value"));
+            g_assert_true(gst_structure_get_int(hardware->controls, "h264_i_frame_minimum_qp_value", &value));
+            g_assert_cmpint(value, ==, 26);
+            g_assert_true(gst_structure_get_int(hardware->controls, "h264_p_frame_minimum_qp_value", &value));
+            g_assert_cmpint(value, ==, 12);
         } else {
             g_assert_true(gst_structure_get_int(hardware->controls, "hevc_i_frame_minimum_qp_value", &value));
             g_assert_cmpint(value, ==, 26);
