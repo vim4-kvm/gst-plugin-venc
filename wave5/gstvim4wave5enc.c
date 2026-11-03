@@ -106,11 +106,15 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
     GstStructure *controls = gst_structure_new("controls",
         "video_bitrate", G_TYPE_INT, self->bitrate * 1000,
         "video_gop_size", G_TYPE_INT, self->gop,
-        "intra_refresh_period", G_TYPE_INT, 0,
+        "intra_refresh_period", G_TYPE_INT, !hevc && !self->gop ? 45 : 0,
         "frame_level_rate_control_enable", G_TYPE_INT, 1,
         "h264_mb_level_rate_control", G_TYPE_INT, 1, NULL);
     gboolean limit_qhd_avc = FALSE;
     if (hevc) {
+        /* Use the P slice QP to refine the coarser on-demand IDR. */
+        if (!self->gop)
+            gst_structure_set(controls, "hevc_i_frame_minimum_qp_value", G_TYPE_INT, 26,
+                "h264_mb_level_rate_control", G_TYPE_INT, 0, NULL);
         gst_structure_set(controls, "hevc_level", G_TYPE_INT, 8, "hevc_profile", G_TYPE_INT,
             main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
     } else {
