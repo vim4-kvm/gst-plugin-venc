@@ -110,10 +110,6 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         "frame_level_rate_control_enable", G_TYPE_INT, 1,
         "h264_mb_level_rate_control", G_TYPE_INT, 1, NULL);
     gboolean limit_qhd_avc = FALSE;
-    /* After static skips, an unconstrained recovery IDR can overwhelm the receiver. */
-    if (!self->gop)
-        gst_structure_set(controls, hevc ? "hevc_i_frame_minimum_qp_value" : "h264_i_frame_minimum_qp_value",
-            G_TYPE_INT, 26, NULL);
     if (hevc) {
         gst_structure_set(controls, "hevc_level", G_TYPE_INT, 8, "hevc_profile", G_TYPE_INT,
             main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
