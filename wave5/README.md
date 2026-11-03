@@ -3,8 +3,11 @@
 `vim4v4l2src` discovers the unique `t7-vdin-test` node and exports leased NV12
 DMA buffers. Its optional `height` property asks VDIN to downscale while preserving
 aspect ratio. `input-rate` reports the capture budget in hundredths of a frame per second.
-For a fixed input it follows the measured DV timings. With Gaming VRR it follows the
-read-only base interval in `VIDIOC_G_PARM`. Buffer timestamps carry the actual cadence.
+For a fixed input it follows measured DV timings. Gaming VRR uses the read-only
+`V4L2_CID_USER_T7_VDIN_VRR_RATE` control (Hz) and reports zero budget when the
+base is unknown. Raw VRR caps carry `framerate=0/1` and a known `max-framerate`.
+`max-fps` limits capture output only when needed. At the encoder input the DMA
+adapter labels the firmware budget in whole fps while preserving buffer PTS.
 
 `vim4wave5enc` discovers the Wave5 encoder and selects H.264 or H.265 from downstream
 caps. `bitrate` is in kbps; `gop=0` enables cyclic intra refresh, while positive GOP

@@ -115,10 +115,14 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
             main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN, NULL);
     } else {
         g_autofree gchar *path = vim4_video_device("t7-vdin-test");
-        struct v4l2_dv_timings timings;
-        gint num, den;
-        if (path && vim4_input_timings(path, &timings, &num, &den) && num > (gint64)61 * den) {
-            limit_qhd_avc = timings.bt.width == 2560 && timings.bt.height == 1440;
+        Vim4Input input;
+        gboolean known = path && vim4_input_timings(path, &input);
+        gboolean high_rate = known && (input.vrr > 60 || input.num > (gint64)60 * input.den);
+        limit_qhd_avc = !known || ((high_rate || input.vrr < 0) &&
+            input.timings.bt.width == 2560 && input.timings.bt.height == 1440);
+        if (!known)
+            GST_WARNING_OBJECT(self, "Input timings unavailable; limiting AVC to 60 fps");
+        if (high_rate) {
             gst_structure_set(controls, "h264_level", G_TYPE_INT, V4L2_MPEG_VIDEO_H264_LEVEL_5_1, NULL);
         }
     }
@@ -130,29 +134,29 @@ static gboolean configure(GstVim4Wave5Enc *self, const gchar *device)
         gst_caps_from_string("video/x-h264");
     g_object_set(self->encoded_caps, "caps", caps, NULL);
     gst_caps_unref(caps);
-    if (!gst_element_link_many(self->planes, self->encoder, self->encoded_caps, NULL)) {
-        GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot link Wave5 plane import and encoder"), (NULL));
-        clear_children(self);
-        return FALSE;
-    }
-    /* QHD120 AVC exceeds Wave5's highest exposed AVC level (5.1).
-     * Leave the normal <=60 pipeline and its allocation path untouched. */
-    GstElement *first = self->planes;
+    /* Limit after the plane adapter translates VFR/fractional caps into a
+     * firmware budget. An unavailable source query also takes the safe path. */
+    GstElement *last = self->planes;
     if (limit_qhd_avc) {
         self->rate_limit = gst_element_factory_make("videorate", NULL);
         if (self->rate_limit) {
             gst_bin_add(GST_BIN(self), self->rate_limit);
             g_object_set(self->rate_limit, "drop-only", TRUE, "max-rate", 60, NULL);
         }
-        if (!self->rate_limit || !gst_element_link(self->rate_limit, self->planes)) {
+        if (!self->rate_limit || !gst_element_link(self->planes, self->rate_limit)) {
             GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot limit QHD AVC to 60 fps"), (NULL));
             clear_children(self);
             return FALSE;
         }
         GST_INFO_OBJECT(self, "Limiting QHD AVC to 60 fps for level 5.1");
-        first = self->rate_limit;
+        last = self->rate_limit;
     }
-    GstPad *pad = gst_element_get_static_pad(first, "sink");
+    if (!gst_element_link_many(last, self->encoder, self->encoded_caps, NULL)) {
+        GST_ELEMENT_ERROR(self, CORE, NEGOTIATION, ("Cannot link Wave5 plane import and encoder"), (NULL));
+        clear_children(self);
+        return FALSE;
+    }
+    GstPad *pad = gst_element_get_static_pad(self->planes, "sink");
     gst_ghost_pad_set_target(GST_GHOST_PAD(self->sink), pad);
     gst_object_unref(pad);
     pad = gst_element_get_static_pad(self->encoded_caps, "src");

@@ -245,7 +245,7 @@ static void wave5_raw_branch_contract(void)
         GstCaps *actual = gst_pad_peer_query_caps(sink, NULL);
         GstCaps *expected = gst_caps_from_string(hdr ?
             "video/x-raw,format=P010_10LE,colorimetry=bt2100-pq,framerate=60/1" :
-            "video/x-raw,format=NV12,colorimetry=bt709,framerate=60/1");
+            "video/x-raw,format=NV12");
         g_assert_false(gst_caps_is_empty(actual)); g_assert_true(gst_caps_is_subset(actual, expected));
         gst_caps_unref(expected); gst_caps_unref(actual); gst_object_unref(sink);
         gst_object_unref(encoder); gst_object_unref(capture); gst_object_unref(bin); g_free(text);

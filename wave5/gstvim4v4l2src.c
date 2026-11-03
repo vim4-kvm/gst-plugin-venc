@@ -3,17 +3,19 @@
 
 typedef struct {
     GstBin parent;
-    GstElement *source, *filter;
-    gint height, num_buffers;
+    GstElement *chain;
+    GstPad *src;
+    gint height, num_buffers, max_fps;
 } GstVim4V4l2Src;
 typedef struct { GstBinClass parent; } GstVim4V4l2SrcClass;
 G_DEFINE_TYPE(GstVim4V4l2Src, gst_vim4_v4l2_src, GST_TYPE_BIN)
-enum { PROP_0, PROP_HEIGHT, PROP_NUM_BUFFERS, PROP_INPUT_RATE };
+enum { PROP_0, PROP_HEIGHT, PROP_NUM_BUFFERS, PROP_INPUT_RATE, PROP_MAX_FPS };
 
 static void set_property(GObject *object, guint id, const GValue *value, GParamSpec *spec)
 {
     GstVim4V4l2Src *self = (GstVim4V4l2Src *)object;
     if (id == PROP_HEIGHT) self->height = g_value_get_int(value);
+    else if (id == PROP_MAX_FPS) self->max_fps = g_value_get_int(value);
     else if (id == PROP_NUM_BUFFERS) self->num_buffers = g_value_get_int(value);
     else G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, spec);
 }
@@ -22,6 +24,7 @@ static void get_property(GObject *object, guint id, GValue *value, GParamSpec *s
 {
     GstVim4V4l2Src *self = (GstVim4V4l2Src *)object;
     if (id == PROP_HEIGHT) g_value_set_int(value, self->height);
+    else if (id == PROP_MAX_FPS) g_value_set_int(value, self->max_fps);
     else if (id == PROP_NUM_BUFFERS) g_value_set_int(value, self->num_buffers);
     else if (id == PROP_INPUT_RATE) g_value_set_int(value, vim4_input_rate());
     else G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, spec);
@@ -31,28 +34,44 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
 {
     GstVim4V4l2Src *self = (GstVim4V4l2Src *)element;
     if (transition == GST_STATE_CHANGE_NULL_TO_READY) {
-        struct v4l2_dv_timings timings;
-        gchar *device = vim4_video_device("t7-vdin-test");
-        gint rate_num, rate_den;
-        if (!device || !self->source || !self->filter ||
-            !vim4_input_timings(device, &timings, &rate_num, &rate_den)) {
-            g_free(device);
-            GST_ELEMENT_ERROR(element, RESOURCE, NOT_FOUND, ("VIM4 HDMI capture or input signal is unavailable"), (NULL));
+        g_autofree gchar *device = vim4_video_device("t7-vdin-test");
+        Vim4Input input;
+        if (!device || !vim4_input_timings(device, &input)) {
+            GST_ELEMENT_ERROR(element, RESOURCE, NOT_FOUND, ("VIM4 HDMI input is unavailable"), (NULL));
             return GST_STATE_CHANGE_FAILURE;
         }
-        guint width = timings.bt.width, height = timings.bt.height;
+        guint width = input.timings.bt.width, height = input.timings.bt.height;
         if (self->height && (guint)self->height < height) {
             width = MAX(320u, ((guint64)width * self->height / height) & ~15u);
             height = self->height & ~1u;
         }
-        GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
-            "width", G_TYPE_INT, width, "height", G_TYPE_INT, height,
-            "framerate", GST_TYPE_FRACTION, rate_num, rate_den, NULL);
-        g_object_set(self->source, "device", device, "io-mode", 4, "num-buffers", self->num_buffers, NULL);
-        g_object_set(self->filter, "caps", caps, NULL);
-        gst_caps_unref(caps); g_free(device);
+        g_autofree gchar *rate = vim4_capture_rate_chain(&input, self->max_fps);
+        g_autofree gchar *pipeline = g_strdup_printf("v4l2src name=capture device=%s io-mode=dmabuf "
+            "num-buffers=%d ! capsfilter caps=video/x-raw,format=NV12,width=%u,height=%u%s",
+            device, self->num_buffers, width, height, rate);
+        GError *error = NULL;
+        self->chain = gst_parse_bin_from_description(pipeline, TRUE, &error);
+        if (error || !self->chain) {
+            GST_ELEMENT_ERROR(element, CORE, NEGOTIATION, ("Cannot build capture chain"),
+                              ("%s", error ? error->message : "missing bin"));
+            g_clear_error(&error);
+            gst_clear_object(&self->chain);
+            return GST_STATE_CHANGE_FAILURE;
+        }
+        gst_bin_add(GST_BIN(self), self->chain);
+        GstPad *pad = gst_element_get_static_pad(self->chain, "src");
+        gst_ghost_pad_set_target(GST_GHOST_PAD(self->src), pad);
+        gst_object_unref(pad);
     }
-    return GST_ELEMENT_CLASS(gst_vim4_v4l2_src_parent_class)->change_state(element, transition);
+    GstStateChangeReturn result = GST_ELEMENT_CLASS(gst_vim4_v4l2_src_parent_class)->change_state(element, transition);
+    if (transition == GST_STATE_CHANGE_READY_TO_NULL ||
+        (transition == GST_STATE_CHANGE_NULL_TO_READY && result == GST_STATE_CHANGE_FAILURE)) {
+        gst_ghost_pad_set_target(GST_GHOST_PAD(self->src), NULL);
+        gst_element_set_state(self->chain, GST_STATE_NULL);
+        gst_bin_remove(GST_BIN(self), self->chain);
+        self->chain = NULL;
+    }
+    return result;
 }
 
 static void gst_vim4_v4l2_src_class_init(GstVim4V4l2SrcClass *klass)
@@ -65,6 +84,9 @@ static void gst_vim4_v4l2_src_class_init(GstVim4V4l2SrcClass *klass)
     g_object_class_install_property(object, PROP_NUM_BUFFERS, g_param_spec_int("num-buffers", "Number of buffers",
         "Capture limit; minus one is unlimited", -1, G_MAXINT, -1,
         G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY | G_PARAM_STATIC_STRINGS));
+    g_object_class_install_property(object, PROP_MAX_FPS, g_param_spec_int("max-fps", "Maximum FPS",
+        "Drop frames above this ceiling; zero follows the input", 0, 120, 0,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
     g_object_class_install_property(object, PROP_INPUT_RATE, g_param_spec_int("input-rate", "HDMI rate",
         "Capture budget in hundredths of a frame per second; zero without signal", 0, 12000, 0,
         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
@@ -80,17 +102,7 @@ static void gst_vim4_v4l2_src_class_init(GstVim4V4l2SrcClass *klass)
 static void gst_vim4_v4l2_src_init(GstVim4V4l2Src *self)
 {
     self->num_buffers = -1;
-    self->source = gst_element_factory_make("v4l2src", "capture");
-    self->filter = gst_element_factory_make("capsfilter", "capture_format");
-    if (!self->source || !self->filter) {
-        if (self->source) gst_object_unref(self->source);
-        if (self->filter) gst_object_unref(self->filter);
-        self->source = self->filter = NULL;
-        return;
-    }
-    gst_bin_add_many(GST_BIN(self), self->source, self->filter, NULL);
-    gst_element_link(self->source, self->filter);
-    GstPad *pad = gst_element_get_static_pad(self->filter, "src");
-    gst_element_add_pad(GST_ELEMENT(self), gst_ghost_pad_new("src", pad));
-    gst_object_unref(pad);
+    GstPadTemplate *templ = gst_element_class_get_pad_template(GST_ELEMENT_GET_CLASS(self), "src");
+    self->src = gst_ghost_pad_new_no_target_from_template("src", templ);
+    gst_element_add_pad(GST_ELEMENT(self), self->src);
 }

@@ -12,10 +12,10 @@ libgstvim4wave5.so: $(SOURCES:.c=.o)
 	$(CC) -shared -o $@ $^ $(LDLIBS)
 
 test-planes: test-planes.o nv12-planes.o
-	$(CC) -o $@ $^ $(LDLIBS)
+	$(CC) -o $@ $^ $(LDLIBS) $(shell $(PKG_CONFIG) --libs gstreamer-app-1.0)
 
 test-encoder: test-encoder.o nv12-planes.o
-	$(CC) -o $@ $^ $(LDLIBS)
+	$(CC) -o $@ $^ $(LDLIBS) $(shell $(PKG_CONFIG) --libs gstreamer-app-1.0)
 
 test-encoder.o: CFLAGS += -Wno-unused-parameter
 

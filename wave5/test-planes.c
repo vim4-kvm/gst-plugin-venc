@@ -2,6 +2,8 @@
 #include "nv12-planes.h"
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/video/video.h>
+#include <gst/app/gstappsink.h>
+#include <gst/app/gstappsrc.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -22,9 +24,47 @@ static GstBuffer *buffer(guint width, guint height, gsize capacity)
     return result;
 }
 
+static void firmware_budget_preserves_pts(void)
+{
+    const gchar *rates[] = {"framerate=59999/1000", "framerate=60000/1001",
+                            "framerate=1199/10", "framerate=0/1,max-framerate=120/1"};
+    const gint budgets[] = {60, 60, 120, 120};
+    const guint64 pts[] = {0, 8333333, 28741496, 37074829};
+    for (guint i = 0; i < G_N_ELEMENTS(rates); i++) {
+        GstElement *pipeline = gst_pipeline_new(NULL);
+        GstElement *src = gst_element_factory_make("appsrc", NULL);
+        GstElement *adapter = g_object_new(gst_vim4_nv12_planes_get_type(), NULL);
+        GstElement *sink = gst_element_factory_make("appsink", NULL);
+        g_autofree gchar *text = g_strdup_printf("video/x-raw,format=NV12,width=64,height=32,%s", rates[i]);
+        GstCaps *caps = gst_caps_from_string(text);
+        g_object_set(src, "format", GST_FORMAT_TIME, "caps", caps, NULL);
+        g_object_set(sink, "sync", FALSE, NULL);
+        gst_caps_unref(caps);
+        gst_bin_add_many(GST_BIN(pipeline), src, adapter, sink, NULL);
+        g_assert_true(gst_element_link_many(src, adapter, sink, NULL));
+        gst_element_set_state(pipeline, GST_STATE_PLAYING);
+        for (guint j = 0; j < G_N_ELEMENTS(pts); j++) {
+            GstBuffer *raw = buffer(64, 32, 64 * 32 * 3 / 2);
+            GST_BUFFER_PTS(raw) = pts[j];
+            g_assert_cmpint(gst_app_src_push_buffer(GST_APP_SRC(src), raw), ==, GST_FLOW_OK);
+            GstSample *out = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), GST_SECOND);
+            g_assert_nonnull(out);
+            gint num, den;
+            g_assert_true(gst_structure_get_fraction(gst_caps_get_structure(gst_sample_get_caps(out), 0),
+                                                     "framerate", &num, &den));
+            g_assert_cmpint(num, ==, budgets[i] * den);
+            g_assert_cmpuint(GST_BUFFER_PTS(gst_sample_get_buffer(out)), ==, pts[j]);
+            gst_sample_unref(out);
+        }
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+    }
+}
+
 int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
+    firmware_budget_preserves_pts();
     const guint sizes[][2] = {{3840,2160},{1920,1080},{1280,720},{640,360}};
     for (guint i = 0; i < G_N_ELEMENTS(sizes); i++) {
         guint width = sizes[i][0], height = sizes[i][1];

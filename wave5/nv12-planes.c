@@ -58,6 +58,37 @@ typedef struct { GstBaseTransform parent; guint width, height; } GstVim4Nv12Plan
 typedef struct { GstBaseTransformClass parent; } GstVim4Nv12PlanesClass;
 G_DEFINE_TYPE(GstVim4Nv12Planes, gst_vim4_nv12_planes, GST_TYPE_BASE_TRANSFORM)
 
+/* This private element feeds the encoder OUTPUT queue. Its whole-fps hint
+ * drives rate control on older Wave5 kernels; buffer PTS still identify
+ * the real capture instants (including when the input is variable). */
+static GstCaps *encoder_caps(GstBaseTransform *base, GstPadDirection direction,
+                             GstCaps *caps, GstCaps *filter)
+{
+    (void)base;
+    GstCaps *result = gst_caps_copy(caps);
+    for (guint i = gst_caps_get_size(result); i > 0; i--) {
+        GstStructure *s = gst_caps_get_structure(result, i - 1);
+        gint num, den;
+        if (direction == GST_PAD_SINK && gst_structure_get_fraction(s, "framerate", &num, &den)) {
+            if (!num && !gst_structure_get_fraction(s, "max-framerate", &num, &den)) {
+                gst_caps_remove_structure(result, i - 1);
+                continue;
+            }
+            gint budget = MAX(1, (gint)gst_util_uint64_scale_round(num, 1, den));
+            gst_structure_set(s, "framerate", GST_TYPE_FRACTION, budget, 1, NULL);
+        } else {
+            gst_structure_remove_field(s, "framerate");
+        }
+        gst_structure_remove_field(s, "max-framerate");
+    }
+    if (filter) {
+        GstCaps *intersection = gst_caps_intersect_full(filter, result, GST_CAPS_INTERSECT_FIRST);
+        gst_caps_unref(result);
+        result = intersection;
+    }
+    return result;
+}
+
 static gboolean set_caps(GstBaseTransform *base, GstCaps *input, GstCaps *output)
 {
     (void)output;
@@ -100,6 +131,7 @@ static void gst_vim4_nv12_planes_class_init(GstVim4Nv12PlanesClass *klass)
     gst_element_class_set_static_metadata(element, "VIM4 NV12 DMA plane views", "Filter/Video",
         "Retain capture leases while importing packed NV12 into Wave5", "vim4-kvm");
     GstBaseTransformClass *base = GST_BASE_TRANSFORM_CLASS(klass);
+    base->transform_caps = encoder_caps;
     base->set_caps = set_caps; base->prepare_output_buffer = prepare;
     base->transform = transform; base->copy_metadata = copy_metadata;
 }
