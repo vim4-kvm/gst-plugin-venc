@@ -1,293 +1,127 @@
 # VIM4 hardware encoder
 
-The `vim4` branch builds the Amlogic encoder plugin from the official Khadas
-source history. Retain the existing authors and copyright notices.
+This page covers encoder integration, DMA ownership and measurement limits.
+Current rule: deploy matched platform components before applications; retain upstream authors and licenses.
+Read [build](#build-and-install), [Main10](#hevc-main10-remote-hdr), [quality](#hevc-fixed-qp-and-lossless),
+[JPEG](#continuous-hardware-jpeg), [rate control](#rate-control), or [shared HDR](#shared-remote-hdr-source).
+Property ranges/defaults come from class_init in each linked implementation or gst-inspect-1.0.
 
 ## Build and install
 
-Build on the Ubuntu ARM64 board, with the image's libamvenc, GE2D and GStreamer
-DRM allocator/bufferpool development files installed:
-
-```sh
-make -C amlvenc PKG_CONFIG=pkg-config CC=gcc -j4
-sudo sh install-vim4.sh amlvenc/libgstamlvenc.so
-sudo systemctl restart nanokvm
-```
-
-The service drop-in selects the plugin from
-`/usr/local/lib/vim4-kvm/gstreamer-1.0`. The packaged vendor plugin is retained
-at its original path. Future system images must include this build and drop-in,
-as well as the vfmcapsrc plugin and board capture services. Application-only
-updates preserve this platform prerequisite.
+Use [amlvenc Makefile](amlvenc/Makefile), [HDR Makefile](hdr/Makefile) and
+[installer](install-vim4.sh) for local build/install inputs. The workspace
+[package recipe](https://github.com/vim4-kvm/vim4-kvm/blob/main/packaging/ubuntu/package.py)
+owns production paths and dependency contracts. Keep private plugins ahead of vendor system plugins;
+do not overwrite the latter. Application-only updates cannot provide missing platform prerequisites.
+Build the pinned SDK with [build-codec.sh](hdr/build-codec.sh), preserving its notices;
+install matched capture, GPU runtime and common launcher before applications.
 
 ## HEVC Main10 remote HDR
 
-`hdr/` builds the explicit `vim4hevc10enc` factory. It accepts contiguous
-P010 input and preserves ten-bit samples, PQ/BT.2020 colorimetry,
-range and the Main10 bitstream profile. SDR P010/BT.709 is also accepted.
-It does not replace the existing eight-bit encoder.
+[Main10 encoder](hdr/gstvim4hevc10.c) preserves input depth and colorimetry.
+[Shared source](hdr/gstvim4h265src.c) delegates HDR scaling to capture's Mali/P010 path,
+avoiding CPU conversion/upload. SDR scaling instead uses GE2D with visible width distinct from pitch:
+VDIN's canvas rounding can otherwise distort ultrawide aspect ratio. Never upscale.
 
-The shared `vim4h265src` used by NanoKVM, JetKVM and PiKVM delegates HDR
-downscaling to `vfmcapsrc height=...`, using the same Mali conversion and
-contiguous P010 DMA path as One-KVM/UU. The capture plugin derives the even
-aspect-preserving width and never upscales. Zero keeps native size; nonzero
-odd requests round down to an even height, with a two-pixel minimum.
-CPU `videoscale`/`videoconvert` no longer sit between capture and Main10 encoding.
-The encoder package requires the capture package's `vim4-hdr-scale-api-1`;
-deploy these matching components before upgrading applications. Native-size
-HDR, global-policy changes and the independent SDR/JPEG paths retain their
-existing bootstrap and teardown rules.
+Keep the extended codec ABI in its private linker namespace with matching libraries.
+The [SDK patch](hdr/p010-cpu-input.patch) handles little-endian CPU P010 without mutating caller memory
+and rounds hardware dimensions while preserving visible cropping. Unaligned widths previously stalled first encode
+and teardown; application-side size acceptance alone does not prove support.
+CPU input requires contiguous planes; DMA additionally requires a physically contiguous allocation
+with the layout validated by the encoder. Arbitrary scatter-gather DMA cannot be imported.
+Unsupported DMA layout may use CPU fallback only when its plane contract is satisfied.
+VideoMeta supplies padded pitch rather than visible width.
 
-For SDR, a nonzero height now keeps VDIN1 capture at native dimensions and
-scales with the companion `vim4scale` GE2D element. VDIN1's own scaler rounds
-widths to a canvas multiple, which changes the aspect ratio of ultrawide or
-arbitrary-height output. GE2D instead uses visible width and VideoMeta pitch
-independently, emits NV12 DMA, and aligns eight-bit HEVC widths down to 16.
-The encoder package also requires `vim4-sdr-scale-api-1`; its capture package
-requires the shared board launcher's `vim4-dma-capture-api-1`. Deploy the platform
-components together. Height zero keeps the existing native SDR path.
+Retain DMA input until the SDK explicitly retires its fd, not merely until an output packet arrives.
+On stop, format change or error, destroy the encoder before returning outstanding pool slots.
+Timing instrumentation is defined in the encoder; encode-call duration excludes mapping and output copies,
+and peak in-flight count includes the submitted input before retirement.
 
-The extended codec ABI must be isolated from the system's libamvenc ABI.
-The plugin loads `/usr/lib/vim4-kvm/hdr/libvpcodec.so` in one private linker
-namespace for the process, with its matching `libamvenc_api.so` beside it.
-Build inputs are pinned in the workspace's Ubuntu download lock; retain the
-SDK's original copyright and license notices. The build applies
-`hdr/p010-cpu-input.patch`: CPU P010 is already little endian and must never be
-byte-swapped in the caller's read-only buffer. Unaligned widths copy two bytes
-per luma sample. HEVC hardware dimensions round up to eight-pixel blocks in
-both directions; conformance cropping preserves the requested visible size.
-Previously only height was rounded, so widths such as 3022 could stall the
-first encode and teardown. The SDK's CPU path derives the UV address from pitch × height;
-the plugin rejects separately mapped planes. A single complete DMA-buf with
-zero luma offset, identical 16-byte-aligned plane pitches, and UV at pitch ×
-height uses the SDK's `DMA_TYPE` path without CPU mapping or the VMALLOC copy.
-The physical allocation must be contiguous (`heap-codecmm` on this board);
-the vendor driver cannot import arbitrary scatter-gather DMA memory. VideoMeta
-supplies the actual padded pitch. Unsupported DMA layouts fall back to the CPU
-path, which still requires its contiguous-plane contract.
-
-DMA inputs stay referenced until the SDK reports their fd retired. A completed
-output packet alone does not release that reference. Stop, format changes and
-encode errors destroy the encoder before returning outstanding DMA pool slots.
-
-`VIM4_VIDEO_TIMING=1` prints cumulative statistics to stderr every 120 encoded
-frames: DMA/CPU input counts, peak pending DMA inputs, current pending count,
-and mean/maximum SDK encode-call duration. The peak includes the current input
-before the call, so immediate retirement reports a peak of one, not zero.
-Statistics reset when the encoder closes or changes format. With the variable
-unset, the plugin does not read the timing clock, update counters or print
-timing logs. The encode duration excludes CPU input mapping and output copying.
-
-```sh
-sh hdr/build-codec.sh /opt/vim4-hdr-encoder ../build/hdr-codec
-make -C hdr SDK=/opt/vim4-hdr-encoder
-make -C hdr SDK=/opt/vim4-hdr-encoder check
-```
-
-The `check` target runs offline with a fake codec and real GStreamer memory. It
-covers unmappable DMA input, padded pitch, delayed fd retirement, CPU fallback,
-premature reuse and error/stop/reopen cleanup. It does not test the hardware's
-DMA import, cache synchronization or Main10 pixel fidelity.
-When the companion capture plugin is on `GST_PLUGIN_PATH`, the source test also
-parses the complete HDR bin in NULL state and checks the capture height and
-P010/framerate contract at the real encoder input. It opens no devices; without
-the companion plugin this integration case reports a skip. Platform builds
-select the freshly built capture plugin automatically.
-
-Run `tests/hevc-main10.py --exclusive` on the board with candidate plugin and
-private libraries installed, all KVM applications stopped. It exercises both
-codec ABIs in one process, repeated open/close, aligned and unaligned widths,
-unchanged input, decoded ten-bit sample quality and bitstream colorimetry.
-UHD also requires the driver to honor the board's `config_mm_sz_mb`; forcing
-the pool to 100 MiB prevents Main10 task-buffer allocation.
-
-The eight-bit encoder also honors NV12/NV21 VideoMeta pitch: a visible width
-of 3440 may use 3456-byte DMA rows. `tests/encoder-stride.py --exclusive`
-checks padded input through both AVC and HEVC and compares decoded pixels.
+The HDR Makefile check target uses a fake codec with real GStreamer memory to cover retirement,
+unmappable DMA, pitch, fallback and cleanup. With the companion capture plugin it also parses the real bin;
+a skipped integration case is not a pass. It tests no hardware DMA import, cache coherency or pixel fidelity.
+[Main10 hardware diagnostic](tests/hevc-main10.py) checks both ABIs, reopen, crop, pixels and bitstream metadata.
+UHD needs the driver's configured encoder memory pool; forcing the old smaller allocation prevents task-buffer creation.
+[Stride diagnostic](tests/encoder-stride.py) covers padded eight-bit AVC/HEVC input.
 
 ## HEVC fixed QP and lossless
 
-`vim4hevc10enc` also accepts eight-bit NV12/NV21 through the same private SDK.
-The output profile follows the input depth (Main or Main10). Default settings
-retain bitrate control. `fixed-qp=0..51` disables rate control and forces the
-same I/P/B picture QP; `-1` restores bitrate control. `lossless=true` overrides
-QP, enables HEVC transform bypass and disables rate control, noise reduction,
-ROI and intra refresh through the private SDK's lossless path.
-
-Lossless preserves the YUV samples supplied to the encoder, including P010's
-ten-bit samples; HDMI conversion, chroma subsampling and scaling precede it.
-Fixed QP and lossless do not enforce the target bitrate or guarantee 60fps.
-Run `tests/hevc-quality.py --exclusive` with the candidate selected and KVM
-applications stopped. It compares every decoded byte for NV12/NV21/P010,
-checks Main/Main10 and PQ metadata, and reads actual slice QP from the bitstream
-for two fixed-QP settings. Ordinary Main10 DMA lifecycle tests remain required.
+Controls and precedence live in [gst_vim4_hevc10_class_init](hdr/gstvim4hevc10.c).
+Fixed QP and lossless bypass bitrate control. Lossless preserves encoder-input YUV,
+including ten-bit samples; it cannot undo HDMI conversion, subsampling or scaling.
+Neither mode guarantees live throughput.
+[Quality diagnostic](tests/hevc-quality.py) checks decoded bytes, profiles, metadata and actual slice QP.
+Keep ordinary DMA lifecycle checks as well; pixel fidelity alone cannot prove safe reuse.
 
 ## Continuous hardware JPEG
 
-`make -C jpeg/vim4` builds `libgstvim4jpegenc.so` (factory `vim4jpegenc`).
-It uses the Amlogic 5.15 `/dev/jpegenc` ioctls directly, with NV12/NV21 DMA
-input and JPEG quality 1–100. The imported buffer is released after every
-completed frame; the vendor library's per-command DMA mode leaks attachments
-and pins all four VDIN buffers. CONFIG_DMA_INPUT plus RELEASE_DMA_INPUT avoids
-that kernel path. Output sizes are checked against the driver's mapped buffers;
-timeouts stop the encoder before capture buffers are returned.
-
-System-memory input is supported for diagnostics; live capture and GE2D scaling
-use DMA without a raw-frame CPU copy. The plugin has no libjpegenc dependency.
-Package it alongside amlvenc in `/usr/lib/vim4-kvm/gstreamer-1.0`.
-Run `tests/jpeg-hardware.py --exclusive` with all KVM services stopped and a
-4K HDMI source. `GST_PLUGIN_PATH` selects the build; `LD_LIBRARY_PATH` must
-include One-KVM's compatible DMA allocator for scaling tests. It checks sustained
-output, quality/resolution changes, JPEG decoding and repeated close/reopen.
-Measured FPS depends on quality, scaling and content; network/client limits
-are separate from encoder throughput. The JPEG and H.264 encoders must not be
-benchmarked concurrently with another KVM viewer.
+[JPEG encoder](jpeg/vim4/gstvim4jpegenc.c) uses direct driver ioctls.
+Import/release each DMA input explicitly: the vendor per-command path leaked attachments and pinned capture buffers.
+On timeout stop encoding before returning capture memory; validate output against mapped capacity.
+System memory is diagnostic fallback, while live capture/scaling remains DMA.
+[Hardware diagnostic](tests/jpeg-hardware.py) exercises sustained output, quality/size changes and reopen.
+Scaling tests need the application's compatible allocator. Encoder throughput is separate from network/client limits;
+never benchmark concurrently with another KVM viewer.
 
 ## Chroma capability
 
-The current libamvenc path outputs 8-bit 4:2:0. RGB input is converted internally;
-it does not imply full-chroma encoding. The plugin does not advertise H.264
-4:4:4/4:2:2/10-bit or HEVC range-extension profiles. Previously a request for
-`high-4:4:4` negotiated successfully while the resulting H.264 SPS still reported
-High profile and 4:2:0. H.265 RGB input similarly produces Main/4:2:0.
-
-Run `python3 tests/encoder-chroma.py --exclusive` as the normal encoder user,
-with KVM applications stopped, candidate `GST_PLUGIN_PATH` and compatible
-allocator `LD_LIBRARY_PATH`. It verifies unsupported profiles are not advertised
-and probes actual H.264/H.265 RGB-input bitstreams with ffprobe. This describes
-the tested vendor API/firmware path, not a proof about every possible silicon mode.
+The [vendor encoder](amlvenc/gstamlvenc.c) produces eight-bit 4:2:0.
+RGB acceptance does not imply full-chroma output: unsupported profile requests previously negotiated
+while SPS still reported ordinary 4:2:0. Check the actual bitstream.
+[Chroma diagnostic](tests/encoder-chroma.py) verifies rejected profiles and RGB output with ffprobe.
+This bounds the tested API/firmware, not every possible silicon mode.
 
 ## Rate control
 
-The `framerate` property accepts 0–120. Zero selects the negotiated input rate,
-rounded to the codec's integer API (60000/1001 becomes 60), or 30 if unknown.
-An explicit value sets the codec budget and per-frame metadata consistently.
-Changing source caps reinitializes the encoder with the new budget.
+[gstamlvenc.c](amlvenc/gstamlvenc.c) owns rate budgets, caps reinitialization and property bounds.
+Budget is distinct from capture pacing and RTP timestamps. Variable-rate source caps cannot reveal
+a changed HDMI rate to the encoder: consumers must supply and update the stable budget.
+A mismatched lower budget was measured to over-allocate bits; test-pattern results measure bit allocation,
+not live throughput or latency. Prior measurements are in the workspace
+[bringup index](https://github.com/vim4-kvm/vim4-kvm/blob/main/docs/bringup/README.md).
 
-vfm_cap currently supplies variable-rate caps. NanoKVM explicitly supplies the
-HDMI receiver rate when it starts a pipeline, capped by its drop-only FPS limit.
-NanoKVM watches for stable HDMI rate changes and reopens the pipeline to update
-the explicit budget. A plugin alone cannot discover a change behind variable-rate caps.
-Rate control changes neither capture pacing nor RTP timestamps.
-
-For 360 identical 4K SMPTE test frames at a nominal 60fps and 12Mbps, encoding
-with a 30fps budget produced 24.11Mbps; a 60fps budget produced 11.51Mbps.
-Periodic keyframes changed from about 86KB to 66KB. Software test-pattern
-generation is slower than real time on this board; these figures measure
-bit allocation, not live capture throughput or latency.
-
-Reproduce with `GST_PLUGIN_PATH=$PWD/amlvenc python3 tests/encoder-budget.py 30`
-and then `60` (or `0` to exercise caps negotiation), with NanoKVM stopped.
-The test opens the hardware encoder; do not run it concurrently with a viewer.
-Run as khadas to share the encoder mutex namespace, and restart NanoKVM afterward.
-
-`tests/encoder-budget.py --codec h264|h265` can also probe higher target rates
-up to 100000 kbps with a separately built experimental plugin. The test rejects
-targets above the loaded plugin's property maximum instead of silently measuring
-the default bitrate. The plugin now accepts up to 60000 kbps; installed older
-builds may still be capped at 12000 kbps. Upgrade the plugin together with the
-applications before using their extended custom bitrate ranges.
-For an isolated experiment, copy the source to a temporary build directory,
-change `PROP_BITRATE_MAX` there, and select that build using `GST_PLUGIN_PATH`
-and a separate `GST_REGISTRY`; do not overwrite the installed plugin.
-The JSON records negotiated caps and measured output arrival FPS. HDMI motion
-is required for live throughput measurements; accepting a target does not prove
-that the content actually produces that bitrate or establish a hardware ceiling.
+[Budget diagnostic](tests/encoder-budget.py) owns options and JSON fields.
+Stop KVM viewers, run as the normal encoder user to share the mutex namespace, and restart the application afterward.
+For an experimental higher ceiling, use an isolated build and registry rather than replacing the installed plugin.
+The test rejects targets above the loaded property's maximum; upgrade plugin and application together.
+Use real HDMI motion for throughput; accepting a target neither produces that bitrate on static content
+nor establishes a hardware ceiling. Arrival intervals include host scheduling and optional file I/O,
+not browser presentation or end-to-end latency.
 
 ## Shared remote HDR source
 
-The `p0-5-native-hdr` candidate also supplies the shared source on V4L2/Wave5.
-Qualification uses the private AMLY capture format, standard HDR10 compound
-controls, bufferless HEVC/Main10/P010 negotiation with PQ/2020/limited VUI,
-and the actual P010 plugin caps. It does not use the kernel release name.
-An encoder profile enumeration alone is insufficient. The probe allocates no
-buffers and starts no streams; the result is not board acceptance.
+[HDR source](hdr/gstvim4h265src.c) qualifies Wave5 using actual AMLY capture, HDR controls,
+P010/Main10 negotiation and VUI rather than kernel name or profile enumeration alone.
+The bufferless probe starts no stream and proves no board performance.
+Preserve pitch, padded UV storage and buffer lease; reject silent format substitution.
+Insert current HDR10 metadata before random access or metadata changes, preserving unrelated SEI;
+drop native access units without fresh metadata, while explicit zero metadata remains valid.
 
-On that backend, native PQ uses `vim4amlysrc` and P010 DMA; mapping/SDR uses
-`vim4v4l2src` and the existing leased NV12 plane adapter. Main10 restricts raw
-input to P010. The wrapper sends the V4L2 Main10 control value (distinct from
-Main Still Picture), retaining the buffer's real pitch/UV storage and lease.
-The shared source inserts HDR10 prefix SEI before an IRAP or metadata change,
-deduplicates existing mastering/CLL messages while preserving other SEI, and
-drops native AUs without fresh HDMI metadata. Explicit zero values remain valid.
+Request the raw pad before READY. Native P010 must pass GPU tone mapping before SDR JPEG;
+never relabel PQ as SDR or open a second VDIN. Bound raw queues and put an idle screenshot valve before its queue.
+Release the entire bin before mode changes, including policy-triggered reopen errors.
+Vendor native HDR keeps independent JPEG; vendor SDR shares one source.
+Reserve encoder memory before capture pools and release the reservation only when SDK ownership is established.
+Capabilities and policy properties can be queried without starting hardware;
+eight-bit controls must not be assumed to configure Main10.
 
-The optional request pad `raw` is requested before READY. It shares this
-capture owner, yielding P010/PQ in native mode and NV12/BT.709 in mapping mode.
-JPEG consumers must insert `vim4pq2sdr`; they must never open a second VDIN or
-label the PQ samples SDR. All raw branches need bounded queues, and screenshot
-branches need an idle valve before their queue. Stop/release the whole bin
-before changing mode; a policy change posts the existing reopen bus error.
-This pad is a Wave5 interface; the 5.15 independent JPEG path is retained.
-
-Offline coverage includes actual bin negotiation and V4L2 control selection,
-silent format substitutions, nonzero SEI bytes, mixed-message deduplication,
-and source cleanup. Four-application/GPU-stack qualification remains a board
-gate; see the workspace's P0-5 evidence before deploying this branch.
-
-The private `hdr/libgstvim4hevc10.so` also provides `vim4h265src` for NanoKVM,
-JetKVM and PiKVM on the qualified native-HDR 5.15 runtime. It reads the global
-`/etc/default/vim4-kvm-hdr` preference and HDMI EOTF. PQ input with
-`HDR_SDR_ENABLED=0` uses GPU P010 capture and hardware Main10; other input uses
-the independent VDIN1 SDR source and the original eight-bit HEVC encoder.
-H.264 and JPEG retain their SDR paths. HLG and 7.x Main10 are not qualified.
-
-The source reserves encoder memory before capture pools and releases the
-reservation once the SDK owns it. A preference/EOTF change posts a bus error;
-consumers must stop the old pipeline completely and reopen it. This avoids
-two codec ABIs sharing an active hardware allocation. Encoded caps carry the
-actual frame colorimetry. `height` downscales HDR with P010 precision and
-preserves aspect ratio; zero keeps input geometry. `gop` and `qp-max` control
-only the eight-bit encoder; Main10 uses target bitrate and explicit IDR requests.
-Read-only integer properties `hdr-capable` and `hdr-requested` report runtime
-qualification and the current input/policy decision without opening hardware.
-PiKVM uses the latter to share one VDIN1 source between JPEG and SDR HEVC.
-
-Build and test with `make -C hdr SDK=/path/to/pinned/sdk libgstvim4hevc10.so check`.
-Install the matching board launcher, GPU runtime and capture plugin before
-the applications. The Ubuntu encoder package provides `vim4-hevc-hdr-api-1`.
+Offline negotiation/SEI/cleanup tests do not qualify all applications or GPU stacks.
+HLG and mainline Main10 remain outside the qualified vendor path; mainline integration is still a board gate.
+Use the workspace evidence index before deployment.
 
 ## Quality ceiling (VBR)
 
-The vendor library has no CBR/VBR switch; its rate control always aims at
-`bitrate` and raises QP (lower quality) in motion. `qp-max=-1` keeps that
-behavior. Values 0–51 enable the custom QP range and cap I/P QP, so quality
-holds and the bitrate may exceed the target. Set it before starting the pipeline;
-it must not be below `i-qp-min`. NanoKVM uses `qp-max=36` for its VBR mode.
-
-Moving 4K desktop content (`tools/latency-source.swift --motion`), 3000 Kbps
-target, 60fps budget, 600 frames each (`--pattern hdmi --bitrate 3000 --qp-max N`):
-
-| qp-max | Average | Peak 1 s |
-| --- | --- | --- |
-| -1 (vendor) | 3.98 Mbps | 4.65 Mbps |
-| 38 | 8.58 Mbps | 10.16 Mbps |
-| 34 | 11.93 Mbps | 14.01 Mbps |
-| 30 | 16.59 Mbps | 19.58 Mbps |
-
-The vendor control overshoots the target by about a third in motion; it is not
-a strict constant bitrate. The vendor `strict_rc_window`/`strict_rc_skip_thresh`
-fields were also measured: they skipped up to 89% of frames without holding the
-average or 1 s peak at the target, so they are not exposed.
+Vendor rate control targets bitrate but is not strict CBR. Capping QP holds quality by permitting overshoot;
+configure before streaming and respect the I-frame floor.
+Strict skip-window experiments dropped frames without meeting the bitrate target, so those fields are not exposed.
+Old per-candidate tables are omitted; compare the same moving workload when making a new decision.
 
 ## Experimental keyframe controls
 
-Both properties must be configured before starting the pipeline. Defaults retain
-the previous vendor behavior; neither is enabled in the application by default.
-
-- `i-qp-min=-1`: vendor defaults. Values 0–51 enable the vendor's custom QP range
-  (`qp_mode=1`) and set the I-frame QP floor. A larger floor can reduce keyframe
-  size at the cost of quality; this is not a byte-size guarantee.
-- `intra-refresh-rows=0`: disabled. Positive values enable row refresh and set
-  the number of MB (H.264) / CTU (HEVC) rows per frame. Values exceeding the
-  current picture's row count are rejected. Firmware effectiveness, browser
-  recovery and visual quality must be measured before enabling this in production.
-
-Use `tests/encoder-budget.py 60 --pattern hdmi --frames 720 --i-qp-min 34`
-for a QP trial, or `--gop 1000 --intra-refresh-rows 3 --request-idr` for a
-refresh trial. `--output /tmp/trial.h264` saves Annex B data for independent
-decode checks. The JSON includes keyframe indices/sizes and post-warmup host
-arrival intervals, which include Python scheduling and optional file-writing
-cost. These are not browser presentation or end-to-end latency measurements.
-Compare the same source workload and separately verify a new viewer and PLI
-recovery. The vendor `cust_gop_qp_delta` describes P-frame QP for special GOP
-modes; it is not exposed as an I-frame size control.
+Property contracts live in [gstamlvenc.c](amlvenc/gstamlvenc.c); application choices belong to their own pipeline code.
+An I-frame QP floor trades quality for size, without a byte-size guarantee.
+Row refresh effectiveness, visual quality, new-viewer startup and PLI recovery need separate measurement;
+do not infer reference-chain recovery from refreshed rows.
+The vendor special-GOP P-frame delta is not an I-frame size control.
+Use the budget diagnostic's keyframe indices/sizes and saved Annex B output for independent decode checks,
+then verify browser recovery on the actual application.
